@@ -1,5 +1,10 @@
 package src
 
+import (
+	"strconv"
+	"time"
+)
+
 type RequestBuilder struct {
 	config  *Config
 	version int
@@ -118,4 +123,38 @@ func (rb *RequestBuilder) GetChats(chatIDs []int) WebSocketPayload {
 		"chatIds": chatIDs,
 	}
 	return rb.buildBaseRequest(GET_CHATS, payload)
+}
+
+func (rb *RequestBuilder) SendMessage(chatID int, text string, replyToMsgID *int) WebSocketPayload {
+	cid := -(time.Now().UnixNano() / 1e6)
+	msgPayload := map[string]interface{}{
+		"text":     text,
+		"cid":      cid,
+		"elements": []interface{}{},
+		"attaches": []interface{}{},
+	}
+	if replyToMsgID != nil {
+		msgPayload["link"] = map[string]interface{}{
+			"type":      "REPLY",
+			"messageId": strconv.FormatInt(int64(*replyToMsgID), 10),
+		}
+	}
+	payload := map[string]interface{}{
+		"chatId":  chatID,
+		"message": msgPayload,
+		"notify":  true,
+	}
+	return rb.buildBaseRequest(SEND_MESSAGE, payload)
+}
+
+func (rb *RequestBuilder) SetReaction(chatID int, messageID int64, emoji string) WebSocketPayload {
+	payload := map[string]interface{}{
+		"chatId":    chatID,
+		"messageId": strconv.FormatInt(messageID, 10),
+		"reaction": map[string]interface{}{
+			"reactionType": "EMOJI",
+			"id":           emoji,
+		},
+	}
+	return rb.buildBaseRequest(SET_REACTION, payload)
 }

@@ -33,14 +33,14 @@ func BuildOutput(message src.Message, senderName string, userNames *src.SafeMap,
 	}
 
 	if strings.HasPrefix(text, "Добавил") || strings.HasPrefix(text, "Присоединился") || strings.HasPrefix(text, "Создал") {
-		return "• " + timeStr + "\n\n" + text
+		return "🕐 • " + timeStr + "\n\n" + text
 	}
 
-	output := "• " + senderName + "\n• " + timeStr
+	output := "👤 • " + senderName + "\n🕐 • " + timeStr
 
 	if message.Status == src.MessageStatusEDITED && message.UpdateTime != nil {
 		editTimeStr := src.FormatTime(*message.UpdateTime, loc)
-		output += "\n• [Редактировано " + editTimeStr + "]"
+		output += "\n✏️ • [Редактировано " + editTimeStr + "]"
 	}
 
 	if message.ForwardedMessage != nil {
@@ -57,7 +57,7 @@ func BuildOutput(message src.Message, senderName string, userNames *src.SafeMap,
 		output += "\n• [Пересланное сообщение от " + fwdSender + "]"
 		if deletionTime != nil {
 			deletionTimeStr := src.FormatTime(*deletionTime, loc)
-			output += "\n• [Удалено " + deletionTimeStr + "]"
+			output += "\n🗑️ • [Удалено " + deletionTimeStr + "]"
 		}
 		fwdText := ""
 		if message.ForwardedMessage.FormattedHTMLText != nil {
@@ -69,7 +69,7 @@ func BuildOutput(message src.Message, senderName string, userNames *src.SafeMap,
 	} else {
 		if deletionTime != nil {
 			deletionTimeStr := src.FormatTime(*deletionTime, loc)
-			output += "\n• [Удалено " + deletionTimeStr + "]"
+			output += "\n🗑️ • [Удалено " + deletionTimeStr + "]"
 		}
 		output += "\n\n" + text
 	}
@@ -113,7 +113,7 @@ func HandleControlMessage(message src.Message, userNames *src.SafeMap, loc *time
 			userID = &uid
 		}
 		name := getName(*userID)
-		return "• " + timeStr + "\n\n" + name + " присоединился(-ась) к чату"
+		return "🕐 • " + timeStr + "\n\n" + name + " присоединился(-ась) к чату"
 
 	case "add":
 		if len(controlAttach.UserIDs) == 0 {
@@ -130,7 +130,7 @@ func HandleControlMessage(message src.Message, userNames *src.SafeMap, loc *time
 		} else {
 			text = actorName + " добавил(-а) " + strings.Join(addedNames[:len(addedNames)-1], ", ") + " и " + addedNames[len(addedNames)-1] + " в чат"
 		}
-		return "• " + timeStr + "\n\n" + text
+		return "🕐 • " + timeStr + "\n\n" + text
 
 	case "remove":
 		var removedUserIDs []int
@@ -152,15 +152,15 @@ func HandleControlMessage(message src.Message, userNames *src.SafeMap, loc *time
 		} else {
 			text = actorName + " удалил(-а) " + strings.Join(removedNames[:len(removedNames)-1], ", ") + " и " + removedNames[len(removedNames)-1] + " из чата"
 		}
-		return "• " + timeStr + "\n\n" + text
+		return "🕐 • " + timeStr + "\n\n" + text
 
 	case "leave":
 		name := getName(message.SenderID)
-		return "• " + timeStr + "\n\n" + name + " покинул(-а) чат"
+		return "🕐 • " + timeStr + "\n\n" + name + " покинул(-а) чат"
 
 	case "new":
 		actorName := getName(message.SenderID)
-		return "• " + timeStr + "\n\n" + actorName + " создал(-а) новый чат"
+		return "🕐 • " + timeStr + "\n\n" + actorName + " создал(-а) новый чат"
 	}
 
 	return ""
@@ -197,7 +197,33 @@ func ProcessMessage(client *src.Client, db *src.Database, sender *src.TelegramSe
 		return
 	}
 
-	src.Logf("Processing message %d from chat %d (sender %d)", message.ID, message.ChatID, message.SenderID)
+	isVirtual := route.TelegramChatID == cfg.DefaultGroupChatID
+
+	if isVirtual {
+		chatTitle := fmt.Sprintf("Chat %d", message.ChatID)
+		chat := client.GetChat(message.ChatID)
+		if chat != nil && chat.Title != "" {
+			chatTitle = chat.Title
+		} else {
+			chats, err := client.GetChatInfo([]int{message.ChatID})
+			if err == nil && len(chats) > 0 && chats[0].Title != "" {
+				chatTitle = chats[0].Title
+			}
+		}
+		if chatTitle == fmt.Sprintf("Chat %d", message.ChatID) {
+			contacts, err := client.GetContacts([]int{message.SenderID})
+			if err == nil && len(contacts) > 0 {
+				name := strings.TrimSpace(contacts[0].FirstName + " " + contacts[0].LastName)
+				if name != "" {
+					chatTitle = name
+				}
+			}
+		}
+		if _, err := sender.EnsureTopicExists(message.ChatID, chatTitle); err != nil {
+			src.Logf("Failed to create topic for chat %d: %v", message.ChatID, err)
+			return
+		}
+	}
 
 	existing, _ := db.GetMessageByMaxID(int64(message.ID))
 	if existing != nil {
@@ -277,7 +303,7 @@ func ProcessMessage(client *src.Client, db *src.Database, sender *src.TelegramSe
 			return
 		}
 		ts := src.GetMessageTime(message)
-		db.AddMessage(int64(message.ID), int64(tgMsgID), int64(message.SenderID), ts, 0)
+		db.AddMessage(int64(message.ID), int64(tgMsgID), int64(message.SenderID), ts, 0, message.ChatID)
 		src.Logf("Control message %d saved with TG ID %d", message.ID, tgMsgID)
 		return
 	}
@@ -475,7 +501,7 @@ func ProcessMessage(client *src.Client, db *src.Database, sender *src.TelegramSe
 	}
 
 	ts := src.GetMessageTime(message)
-	db.AddMessage(int64(message.ID), int64(tgMsgID), int64(message.SenderID), ts, 0)
+	db.AddMessage(int64(message.ID), int64(tgMsgID), int64(message.SenderID), ts, 0, message.ChatID)
 	src.Logf("Message %d sent to Telegram with TG ID %d", message.ID, tgMsgID)
 }
 
@@ -507,9 +533,22 @@ func HandleEditedMessage(client *src.Client, db *src.Database, sender *src.Teleg
 		return
 	}
 
-	hasAttachments := len(message.Attaches) > 0
-	if message.ForwardedMessage != nil {
-		hasAttachments = hasAttachments || len(message.ForwardedMessage.Attaches) > 0
+	hasAttachments := false
+	for _, a := range message.Attaches {
+		if a.Type == src.AttachmentTypePhoto || a.Type == src.AttachmentTypeVideo ||
+			a.Type == src.AttachmentTypeFile || a.Type == src.AttachmentTypeAudio {
+			hasAttachments = true
+			break
+		}
+	}
+	if !hasAttachments && message.ForwardedMessage != nil {
+		for _, a := range message.ForwardedMessage.Attaches {
+			if a.Type == src.AttachmentTypePhoto || a.Type == src.AttachmentTypeVideo ||
+				a.Type == src.AttachmentTypeFile || a.Type == src.AttachmentTypeAudio {
+				hasAttachments = true
+				break
+			}
+		}
 	}
 
 	if hasAttachments {
@@ -587,12 +626,6 @@ func HandleDeletedMessage(client *src.Client, db *src.Database, sender *src.Tele
 		err = sender.EditMessageCaption(tgMsgID, output, message.ChatID)
 	} else {
 		err = sender.EditMessageText(tgMsgID, output, message.ChatID)
-	}
-
-	if err != nil {
-		src.Logf("Failed to edit deleted message %d in Telegram: %v", message.ID, err)
-	} else {
-		src.Logf("Message %d marked as deleted (edited with marker)", message.ID)
 	}
 }
 
@@ -680,7 +713,7 @@ func main() {
 	}
 	defer db.Close()
 
-	telegramSender := src.NewTelegramSender(cfg.TGToken, cfg.ChatRoutes, cfg)
+	telegramSender := src.NewTelegramSender(cfg.TGToken, cfg.ChatRoutes, cfg, db)
 
 	userNames := src.NewSafeMap()
 	channelNames := src.NewSafeIntMap()
@@ -711,8 +744,8 @@ func main() {
 		if cfg.TGDebugUserID != 0 {
 			telegramSender.SendDebugMessage("Reconnected!", cfg.TGDebugUserID)
 		}
-		for _, route := range cfg.ChatRoutes {
-			SyncChatHistory(client, db, telegramSender, userNames, channelNames, cfg, route.MaxChatID)
+		for _, chatID := range telegramSender.GetAllMaxChatIDs() {
+			SyncChatHistory(client, db, telegramSender, userNames, channelNames, cfg, chatID)
 		}
 	})
 
@@ -728,7 +761,9 @@ func main() {
 	}
 	src.Logf("Connected as %s (ID: %d)", me.FirstName, me.ID)
 
+	explicitRouteIDs := make(map[int]bool)
 	for _, route := range cfg.ChatRoutes {
+		explicitRouteIDs[route.MaxChatID] = true
 		targetChat := client.GetChat(route.MaxChatID)
 		if targetChat == nil {
 			src.Logf("Chat %d not found", route.MaxChatID)
@@ -741,6 +776,14 @@ func main() {
 
 		SyncChatHistory(client, db, telegramSender, userNames, channelNames, cfg, route.MaxChatID)
 	}
+
+	for _, chatID := range telegramSender.GetAllMaxChatIDs() {
+		if !explicitRouteIDs[chatID] {
+			SyncChatHistory(client, db, telegramSender, userNames, channelNames, cfg, chatID)
+		}
+	}
+
+	go telegramSender.StartPolling(client, db)
 
 	select {}
 }

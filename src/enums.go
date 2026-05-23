@@ -16,9 +16,11 @@ const (
 	GET_CHATS      Opcode = 48
 	GET_MESSAGES   Opcode = 49
 	SUBSCRIBE_CHAT Opcode = 75
+	SEND_MESSAGE   Opcode = 64
 	GET_VIDEO      Opcode = 83
 	GET_FILE       Opcode = 88
 	ON_MESSAGE     Opcode = 128
+	SET_REACTION   Opcode = 178
 )
 
 type MessageStatus int32

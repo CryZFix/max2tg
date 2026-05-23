@@ -167,7 +167,8 @@ type Config struct {
 	SaveDeleted          bool   `yaml:"save_deleted"`
 	TruncateLongMessages bool   `yaml:"truncate_long_messages"`
 
-	ChatRoutes []ChatRoute `yaml:"chats"`
+	DefaultGroupChatID int64       `yaml:"default_group"`
+	ChatRoutes         []ChatRoute `yaml:"chats"`
 
 	MaxRetries     int           `yaml:"max_retries"`
 	BaseRetryDelay time.Duration `yaml:"base_retry_delay"`

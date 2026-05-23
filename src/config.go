@@ -204,8 +204,15 @@ func validateConfig(cfg *Config) error {
 		}
 	}
 
-	if len(cfg.ChatRoutes) == 0 {
-		return fmt.Errorf("no chat routes configured: at least one route must be defined in config.yml 'chats' section")
+	hasRoutes := len(cfg.ChatRoutes) > 0
+	hasDefaultGroup := cfg.DefaultGroupChatID != 0
+
+	if !hasRoutes && !hasDefaultGroup {
+		return fmt.Errorf("no chat routes configured: define at least one route in 'chats' section or set 'default_group'")
+	}
+
+	if hasDefaultGroup && cfg.DefaultGroupChatID == 0 {
+		return fmt.Errorf("default_group must be a non-zero Telegram chat ID")
 	}
 
 	for i, route := range cfg.ChatRoutes {
@@ -282,6 +289,12 @@ media_download_retry_delay: %s
 # EN: WebSocket ping timeout
 # RU: таймаут для ping WebSocket
 ping_timeout: %s
+
+# EN: default Telegram group for auto-routing MAX chats without explicit routes
+#     each such chat will get its own forum topic created automatically
+# RU: группа Telegram по умолчанию для автоматической маршрутизации чатов MAX без явных маршрутов
+#     для каждого такого чата будет автоматически создан отдельный топик
+# default_group: -1001234567890
 
 # EN: chat routing configuration
 # RU: конфигурация маршрутизации чатов

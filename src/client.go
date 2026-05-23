@@ -446,6 +446,56 @@ func (c *Client) GetVideoLink(videoAttachment Attachment, message Message) (stri
 	return "", NewInvalidResponseError("no URL in video link response")
 }
 
+func (c *Client) SendMessage(chatID int, text string, replyToMsgID *int) (int, error) {
+	if !c.connection.IsConnected() {
+		return 0, NewConnectionError("WebSocket not connected")
+	}
+	reqData := c.connection.GetRequestBuilder().SendMessage(chatID, text, replyToMsgID)
+	response, err := c.connection.sendAndReceive(reqData, 10*time.Second)
+	if err != nil {
+		return 0, err
+	}
+	opcodeFloat, _ := response["opcode"].(float64)
+	cmdFloat, _ := response["cmd"].(float64)
+	opcode := int(opcodeFloat)
+	cmd := int(cmdFloat)
+	if opcode != int(SEND_MESSAGE) || cmd != 1 {
+		return 0, NewInvalidResponseError("invalid send message response")
+	}
+	payload, ok := response["payload"].(map[string]interface{})
+	if !ok {
+		return 0, NewInvalidResponseError("invalid send message response payload")
+	}
+	msgData, ok := payload["message"].(map[string]interface{})
+	if !ok {
+		return 0, NewInvalidResponseError("no message in response")
+	}
+	msgID := ParseID(msgData["id"])
+	if msgID == 0 {
+		return 0, NewInvalidResponseError("no message ID in response")
+	}
+	return msgID, nil
+}
+
+func (c *Client) SetReaction(chatID int, messageID int64, emoji string) error {
+	if !c.connection.IsConnected() {
+		return NewConnectionError("WebSocket not connected")
+	}
+	reqData := c.connection.GetRequestBuilder().SetReaction(chatID, messageID, emoji)
+	response, err := c.connection.sendAndReceive(reqData, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	opcodeFloat, _ := response["opcode"].(float64)
+	cmdFloat, _ := response["cmd"].(float64)
+	opcode := int(opcodeFloat)
+	cmd := int(cmdFloat)
+	if opcode != int(SET_REACTION) || cmd != 1 {
+		return NewInvalidResponseError("invalid set reaction response")
+	}
+	return nil
+}
+
 func (c *Client) GetConfig() *Config {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
