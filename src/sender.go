@@ -25,7 +25,18 @@ type TelegramSender struct {
 	baseRetryDelay     time.Duration
 	config             *Config
 	httpClient         *http.Client
+	albumMu            sync.Mutex
+	albums             map[string]*telegramAlbum
+	localEditMu        sync.Mutex
+	localEdits         map[telegramEditKey]time.Time
 }
+
+type telegramEditKey struct {
+	chatID    int64
+	messageID int
+}
+
+const localTelegramEditTTL = 5 * time.Minute
 
 func NewTelegramSender(botToken string, routes []ChatRoute, cfg *Config, db *Database) *TelegramSender {
 	if cfg == nil {
@@ -52,6 +63,8 @@ func NewTelegramSender(botToken string, routes []ChatRoute, cfg *Config, db *Dat
 		baseRetryDelay:     cfg.BaseRetryDelay,
 		config:             cfg,
 		httpClient:         httpClient,
+		albums:             make(map[string]*telegramAlbum),
+		localEdits:         make(map[telegramEditKey]time.Time),
 	}
 
 	sender.loadVirtualRoutesFromDB()
@@ -716,6 +729,7 @@ func (s *TelegramSender) EditMessageText(messageID int, text string, maxChatID i
 			continue
 		}
 
+		s.markLocalTelegramEdit(route.TelegramChatID, messageID)
 		return nil
 	}
 
@@ -797,6 +811,7 @@ func (s *TelegramSender) EditMessageCaption(messageID int, caption string, maxCh
 			continue
 		}
 
+		s.markLocalTelegramEdit(route.TelegramChatID, messageID)
 		return nil
 	}
 
@@ -1074,6 +1089,7 @@ func (s *TelegramSender) SendDebugMessage(text string, userID int64) error {
 type TelegramUpdate struct {
 	UpdateID        int                  `json:"update_id"`
 	Message         *TelegramMessage     `json:"message,omitempty"`
+	EditedMessage   *TelegramMessage     `json:"edited_message,omitempty"`
 	MessageReaction *MessageReactionData `json:"message_reaction,omitempty"`
 }
 
@@ -1082,10 +1098,33 @@ type TelegramMessage struct {
 	From            *TelegramUser    `json:"from,omitempty"`
 	Chat            TelegramChat     `json:"chat"`
 	Text            string           `json:"text,omitempty"`
+	Caption         string           `json:"caption,omitempty"`
 	Date            int64            `json:"date"`
 	IsTopicMessage  bool             `json:"is_topic_message,omitempty"`
 	MessageThreadID int              `json:"message_thread_id,omitempty"`
 	ReplyTo         *TelegramMessage `json:"reply_to_message,omitempty"`
+	MediaGroupID    string           `json:"media_group_id,omitempty"`
+	Photo           []TelegramPhoto  `json:"photo,omitempty"`
+	Video           *TelegramFileRef `json:"video,omitempty"`
+	Document        *TelegramFileRef `json:"document,omitempty"`
+	Audio           *TelegramFileRef `json:"audio,omitempty"`
+	Voice           *TelegramFileRef `json:"voice,omitempty"`
+	Animation       *TelegramFileRef `json:"animation,omitempty"`
+}
+
+type TelegramPhoto struct {
+	FileID   string `json:"file_id"`
+	FileSize int64  `json:"file_size,omitempty"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+}
+
+type TelegramFileRef struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	FileSize int64  `json:"file_size,omitempty"`
+	Duration int    `json:"duration,omitempty"`
 }
 
 type TelegramUser struct {
@@ -1156,6 +1195,9 @@ func (s *TelegramSender) StartPolling(client *Client, db *Database) {
 			if update.Message != nil {
 				s.handleTelegramMessage(client, db, *update.Message)
 			}
+			if update.EditedMessage != nil {
+				s.handleTelegramEditedMessage(client, db, *update.EditedMessage)
+			}
 			if update.MessageReaction != nil {
 				s.handleTelegramReaction(client, db, *update.MessageReaction)
 			}
@@ -1173,7 +1215,7 @@ func pollUpdates(httpClient *http.Client, botToken string, offset int, timeout i
 	payload := map[string]interface{}{
 		"offset":          offset,
 		"timeout":         timeout,
-		"allowed_updates": []string{"message", "message_reaction"},
+		"allowed_updates": []string{"message", "edited_message", "message_reaction"},
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -1208,22 +1250,137 @@ func pollUpdates(httpClient *http.Client, botToken string, offset int, timeout i
 }
 
 func (s *TelegramSender) handleTelegramMessage(client *Client, db *Database, msg TelegramMessage) {
-	tgChatID := msg.Chat.ID
-	tgTopicID := msg.MessageThreadID
-
 	if msg.From != nil && msg.From.ID == 777000 {
 		return
 	}
-
-	if msg.Text == "" {
+	if s.handleMaxDeleteCommand(client, db, msg) {
 		return
 	}
 
-	existing, _ := db.GetMessageByTgID(int64(msg.MessageID))
-	if existing != nil {
+	if msg.Text == "" && msg.Caption == "" && !msg.HasMedia() {
 		return
 	}
 
+	_, _, found, _ := db.GetMaxMessageForTgID(int64(msg.MessageID))
+	if found {
+		return
+	}
+	if msg.MediaGroupID != "" {
+		s.enqueueAlbum(client, db, msg)
+		return
+	}
+	s.forwardTelegramMessages(client, db, []TelegramMessage{msg})
+}
+
+func isMaxDeleteCommand(text string) bool {
+	parts := strings.Fields(text)
+	if len(parts) == 0 {
+		return false
+	}
+	command := strings.SplitN(parts[0], "@", 2)[0]
+	return command == "/maxdelete"
+}
+
+// handleMaxDeleteCommand deletes the linked MAX message only when the command
+// is issued by the configured bridge owner as a reply to that message.
+func (s *TelegramSender) handleMaxDeleteCommand(client *Client, db *Database, msg TelegramMessage) bool {
+	if !isMaxDeleteCommand(msg.Text) {
+		return false
+	}
+	if s.config.TGDebugUserID == 0 || msg.From == nil || msg.From.ID != s.config.TGDebugUserID {
+		Logf("Ignoring /maxdelete from unauthorized Telegram user")
+		return true
+	}
+	if msg.ReplyTo == nil {
+		Logf("Ignoring /maxdelete without a replied-to message")
+		return true
+	}
+
+	maxMessageID, maxChatID, found, err := db.GetMaxMessageForTgID(int64(msg.ReplyTo.MessageID))
+	if err != nil {
+		Logf("Failed to look up MAX message for /maxdelete: %v", err)
+		return true
+	}
+	if !found {
+		Logf("Ignoring /maxdelete: replied Telegram message %d has no MAX link", msg.ReplyTo.MessageID)
+		return true
+	}
+
+	Logf("Deleting MAX message %d in chat %d from /maxdelete", maxMessageID, maxChatID)
+	if err := client.DeleteMessage(maxChatID, maxMessageID); err != nil {
+		Logf("Failed to delete MAX message %d from /maxdelete: %v", maxMessageID, err)
+		return true
+	}
+	Logf("MAX message %d deleted by /maxdelete", maxMessageID)
+	return true
+}
+
+func (s *TelegramSender) markLocalTelegramEdit(chatID int64, messageID int) {
+	s.localEditMu.Lock()
+	defer s.localEditMu.Unlock()
+	now := time.Now()
+	for key, expiresAt := range s.localEdits {
+		if !expiresAt.After(now) {
+			delete(s.localEdits, key)
+		}
+	}
+	s.localEdits[telegramEditKey{chatID: chatID, messageID: messageID}] = now.Add(localTelegramEditTTL)
+}
+
+func (s *TelegramSender) consumeLocalTelegramEdit(chatID int64, messageID int) bool {
+	s.localEditMu.Lock()
+	defer s.localEditMu.Unlock()
+	key := telegramEditKey{chatID: chatID, messageID: messageID}
+	expiresAt, found := s.localEdits[key]
+	if !found {
+		return false
+	}
+	delete(s.localEdits, key)
+	return expiresAt.After(time.Now())
+}
+
+func (s *TelegramSender) handleTelegramEditedMessage(client *Client, db *Database, msg TelegramMessage) {
+	if msg.From != nil && msg.From.ID == 777000 {
+		return
+	}
+	if s.consumeLocalTelegramEdit(msg.Chat.ID, msg.MessageID) {
+		Logf("Ignoring local Telegram edit for message %d in chat %d", msg.MessageID, msg.Chat.ID)
+		return
+	}
+
+	maxMessageID, maxChatID, found, err := db.GetMaxMessageForTgID(int64(msg.MessageID))
+	if err != nil {
+		Logf("Failed to look up MAX message for edited Telegram message %d: %v", msg.MessageID, err)
+		return
+	}
+	if !found {
+		Logf("Edited Telegram message %d has no MAX message link, skipping", msg.MessageID)
+		return
+	}
+
+	text := msg.Text
+	if msg.HasMedia() {
+		text = msg.Caption
+	}
+	Logf("Editing MAX message %d in chat %d from Telegram message %d", maxMessageID, maxChatID, msg.MessageID)
+	if err := client.EditMessage(maxChatID, maxMessageID, text); err != nil {
+		Logf("Failed to edit MAX message %d from Telegram message %d: %v", maxMessageID, msg.MessageID, err)
+		return
+	}
+	Logf("Telegram message %d edited in MAX message %d", msg.MessageID, maxMessageID)
+}
+
+func (m TelegramMessage) HasMedia() bool {
+	return len(m.Photo) > 0 || m.Video != nil || m.Document != nil || m.Audio != nil || m.Voice != nil || m.Animation != nil
+}
+
+func (s *TelegramSender) forwardTelegramMessages(client *Client, db *Database, messages []TelegramMessage) {
+	if len(messages) == 0 {
+		return
+	}
+	msg := messages[0]
+	tgChatID := msg.Chat.ID
+	tgTopicID := msg.MessageThreadID
 	route := s.FindReverseRoute(tgChatID, tgTopicID)
 	if route == nil {
 		Logf("No reverse route found for Telegram chat %d topic %d", tgChatID, tgTopicID)
@@ -1231,14 +1388,17 @@ func (s *TelegramSender) handleTelegramMessage(client *Client, db *Database, msg
 	}
 
 	text := msg.Text
+	if text == "" {
+		text = msg.Caption
+	}
 
 	var replyToMaxID *int
 	if msg.ReplyTo != nil {
 		parentTgID := int64(msg.ReplyTo.MessageID)
-		parentRecord, err := db.GetMessageByTgID(parentTgID)
-		if err == nil && parentRecord != nil {
-			maxID := int(parentRecord["max_message_id"].(int64))
-			replyToMaxID = &maxID
+		maxID, _, found, err := db.GetMaxMessageForTgID(parentTgID)
+		if err == nil && found {
+			id := int(maxID)
+			replyToMaxID = &id
 		}
 	}
 
@@ -1252,14 +1412,28 @@ func (s *TelegramSender) handleTelegramMessage(client *Client, db *Database, msg
 		Logf("Forwarding message from Telegram chat %d to MAX chat %d: %s", tgChatID, route.MaxChatID, logText)
 	}
 
-	maxMsgID, err := client.SendMessage(route.MaxChatID, text, replyToMaxID)
+	media, cleanup, err := s.downloadTelegramMedia(messages)
+	if err != nil {
+		Logf("Failed to download Telegram media: %v", err)
+		return
+	}
+	defer cleanup()
+	var maxMsgID int
+	if len(media) > 0 {
+		maxMsgID, err = client.SendMediaMessage(route.MaxChatID, text, media, replyToMaxID)
+	} else {
+		maxMsgID, err = client.SendMessage(route.MaxChatID, text, replyToMaxID)
+	}
 	if err != nil {
 		Logf("Failed to send message to MAX chat %d: %v", route.MaxChatID, err)
 		return
 	}
 
-	ts := time.Now().UnixMilli()
-	db.AddMessage(int64(maxMsgID), int64(msg.MessageID), 0, ts, 0, route.MaxChatID)
+	for _, message := range messages {
+		if err := db.AddTelegramMessageLink(int64(message.MessageID), int64(maxMsgID), route.MaxChatID); err != nil {
+			Logf("Failed to save Telegram message link %d: %v", message.MessageID, err)
+		}
+	}
 	Logf("Message forwarded to MAX chat %d, MAX msg ID: %d (TG msg ID: %d)", route.MaxChatID, maxMsgID, msg.MessageID)
 }
 

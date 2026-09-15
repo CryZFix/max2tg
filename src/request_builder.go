@@ -2,6 +2,8 @@ package src
 
 import (
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -9,6 +11,7 @@ type RequestBuilder struct {
 	config  *Config
 	version int
 	seq     int
+	mu      sync.Mutex
 }
 
 func NewRequestBuilder(config *Config) *RequestBuilder {
@@ -20,6 +23,8 @@ func NewRequestBuilder(config *Config) *RequestBuilder {
 }
 
 func (rb *RequestBuilder) buildBaseRequest(opcode Opcode, payload map[string]interface{}) WebSocketPayload {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
 	request := WebSocketPayload{
 		"ver":     rb.version,
 		"cmd":     0,
@@ -27,12 +32,30 @@ func (rb *RequestBuilder) buildBaseRequest(opcode Opcode, payload map[string]int
 		"opcode":  int(opcode),
 		"payload": payload,
 	}
-	rb.incrementSeq()
+	rb.seq++
 	return request
 }
 
 func (rb *RequestBuilder) incrementSeq() {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
 	rb.seq++
+}
+
+func (rb *RequestBuilder) ImageUpload(count int) WebSocketPayload {
+	return rb.buildBaseRequest(IMAGE_UPLOAD, map[string]interface{}{"count": count})
+}
+
+func (rb *RequestBuilder) VideoUpload(chatID, count int) WebSocketPayload {
+	return rb.buildBaseRequest(VIDEO_UPLOAD, map[string]interface{}{"chatId": chatID, "count": count})
+}
+
+func (rb *RequestBuilder) FileUpload(name string, size int64) WebSocketPayload {
+	ext := ""
+	if dot := strings.LastIndex(name, "."); dot >= 0 && dot < len(name)-1 {
+		ext = name[dot+1:]
+	}
+	return rb.buildBaseRequest(FILE_UPLOAD, map[string]interface{}{"name": name, "size": size, "ext": ext, "count": 1})
 }
 
 func (rb *RequestBuilder) Init() WebSocketPayload {
@@ -92,6 +115,34 @@ func (rb *RequestBuilder) GetChatMessages(chatID int, fromTime int64, forward, b
 	return rb.buildBaseRequest(GET_MESSAGES, payload)
 }
 
+func (rb *RequestBuilder) GetMessage(chatID int, messageID int64) WebSocketPayload {
+	payload := map[string]interface{}{
+		"chatId":     chatID,
+		"messageIds": []string{strconv.FormatInt(messageID, 10)},
+	}
+	return rb.buildBaseRequest(GET_MESSAGE, payload)
+}
+
+func (rb *RequestBuilder) EditMessage(chatID int, messageID int64, text string, attachments []interface{}) WebSocketPayload {
+	payload := map[string]interface{}{
+		"chatId":      chatID,
+		"messageId":   strconv.FormatInt(messageID, 10),
+		"text":        text,
+		"elements":    []interface{}{},
+		"attachments": attachments,
+	}
+	return rb.buildBaseRequest(EDIT_MESSAGE, payload)
+}
+
+func (rb *RequestBuilder) DeleteMessage(chatID int, messageID int64) WebSocketPayload {
+	payload := map[string]interface{}{
+		"chatId":     chatID,
+		"messageIds": []string{strconv.FormatInt(messageID, 10)},
+		"forMe":      false,
+	}
+	return rb.buildBaseRequest(DELETE_MESSAGE, payload)
+}
+
 func (rb *RequestBuilder) GetVideoLink(videoID, chatID, messageID int) WebSocketPayload {
 	payload := map[string]interface{}{
 		"videoId":   videoID,
@@ -126,12 +177,16 @@ func (rb *RequestBuilder) GetChats(chatIDs []int) WebSocketPayload {
 }
 
 func (rb *RequestBuilder) SendMessage(chatID int, text string, replyToMsgID *int) WebSocketPayload {
+	return rb.SendMessageWithAttachments(chatID, text, nil, replyToMsgID)
+}
+
+func (rb *RequestBuilder) SendMessageWithAttachments(chatID int, text string, attaches []map[string]interface{}, replyToMsgID *int) WebSocketPayload {
 	cid := -(time.Now().UnixNano() / 1e6)
 	msgPayload := map[string]interface{}{
 		"text":     text,
 		"cid":      cid,
 		"elements": []interface{}{},
-		"attaches": []interface{}{},
+		"attaches": attaches,
 	}
 	if replyToMsgID != nil {
 		msgPayload["link"] = map[string]interface{}{

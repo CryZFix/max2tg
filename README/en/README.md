@@ -4,9 +4,13 @@ A bridge between [MAX](https://max.ru) messenger and [Telegram](https://telegram
 
 ## Features
 
-- **Message forwarding** — text, photos, audio, voice messages, videos, files. Each message is displayed with the original sender's name.
-- **Edit sync** — when a message is edited in MAX, the corresponding Telegram message updates automatically.
-- **Deletion handling** — deleted messages are either removed from Telegram or marked with a `[Deleted ...]` label (configurable).
+- **Message forwarding** — text, photos, audio, voice messages, videos, and files. Each message is displayed with the original sender's name.
+- **Native media in both directions** — MAX voice messages are sent to Telegram as transcribable voice messages; Telegram photos, videos, and voice messages are uploaded to MAX as native attachments. Documents, regular audio, and GIFs are sent as files.
+- **Telegram albums** — a media group is forwarded as one MAX message with its shared caption.
+
+> If MAX rejects a native photo or video upload, the bridge automatically retries it as a regular file and logs the reason.
+- **Two-way edit sync** — text and captions are updated between MAX and Telegram; media remains attached when a caption changes.
+- **Deletion handling** — deleted MAX messages are either removed from Telegram or marked with a `[Deleted ...]` label (configurable). A linked MAX message can be deleted manually from Telegram with `/maxdelete`.
 - **System events** — joining a chat, adding and removing members, chat creation.
 - **History sync** — on startup and after reconnection, missed messages are fetched and forwarded.
 - **Routing** — each MAX chat can be directed to a separate Telegram chat or topic.
@@ -96,7 +100,23 @@ TG_TOKEN=your_telegram_bot_token
 TG_DEBUG_USER_ID=your_telegram_user_id
 ```
 
-`TG_DEBUG_USER_ID` is optional. If set, the bot will send you personal messages on disconnect and reconnect. You can find your ID via [@userinfobot](https://t.me/userinfobot).
+`TG_DEBUG_USER_ID` is optional for debug notifications. If set, the bot will send you personal messages on disconnect and reconnect. This user is also the only one allowed to run `/maxdelete`. You can find your ID via [@userinfobot](https://t.me/userinfobot).
+
+### Native Telegram voice messages
+
+Telegram `Voice` is forwarded as a native MAX voice note through the configured web token: the bridge opens a binary web session, requests an `uploadAudio` slot, uploads the OGG, and sends an `AUDIO` attachment with duration and waveform.
+
+Install `ffmpeg` and `ffprobe` for an accurate waveform and duration. If MAX temporarily rejects the native upload, the original OGG is automatically sent as a file.
+
+### Manually deleting a MAX message
+
+The Telegram Bot API doesn't send regular message-deletion events to bots, so reverse deletion is manual. Reply to a previously forwarded message with:
+
+```text
+/maxdelete
+```
+
+The bridge deletes only the linked MAX message. The command is available only to the user whose ID is set in `TG_DEBUG_USER_ID`; without a reply or for a message without a stored link, it does nothing. The Telegram message itself is not deleted.
 
 ### Step 3: Create a Telegram bot
 

@@ -47,6 +47,7 @@ type Connection struct {
 	reconnectLock       sync.Mutex
 	stopCh              chan struct{}
 	stopOnce            sync.Once
+	writeMu             sync.Mutex
 
 	mu sync.RWMutex
 }
@@ -338,6 +339,8 @@ func (c *Connection) send(payload WebSocketPayload) error {
 		}
 	}
 
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	c.conn.SetWriteDeadline(time.Now().Add(websocketWriteTimeout))
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		return NewConnectionError("failed to send: " + err.Error())

@@ -43,12 +43,42 @@ func createTables(db *sql.DB) error {
 			max_chat_id INTEGER PRIMARY KEY,
 			telegram_topic_id INTEGER NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS telegram_message_links (
+			tg_message_id INTEGER PRIMARY KEY,
+			max_message_id INTEGER NOT NULL,
+			max_chat_id INTEGER NOT NULL
+		);
 	`)
 	if err != nil {
 		return err
 	}
 	db.Exec(`ALTER TABLE messages ADD COLUMN max_chat_id INTEGER DEFAULT 0`)
 	return nil
+}
+
+func (d *Database) AddTelegramMessageLink(tgMessageID, maxMessageID int64, maxChatID int) error {
+	_, err := d.db.Exec(`INSERT OR REPLACE INTO telegram_message_links (tg_message_id, max_message_id, max_chat_id) VALUES (?, ?, ?)`, tgMessageID, maxMessageID, maxChatID)
+	return err
+}
+
+func (d *Database) GetMaxMessageForTgID(tgMessageID int64) (int64, int, bool, error) {
+	if record, err := d.GetMessageByTgID(tgMessageID); err != nil || record != nil {
+		if err != nil || record == nil {
+			return 0, 0, false, err
+		}
+		return record["max_message_id"].(int64), int(record["max_chat_id"].(int64)), true, nil
+	}
+	var maxID int64
+	var chatID int
+	err := d.db.QueryRow(`SELECT max_message_id, max_chat_id FROM telegram_message_links WHERE tg_message_id = ?`, tgMessageID).Scan(&maxID, &chatID)
+	if err == sql.ErrNoRows {
+		return 0, 0, false, nil
+	}
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return maxID, chatID, true, nil
 }
 
 func (d *Database) AddMessage(maxMessageID, tgMessageID, maxSenderID, timestamp, editedAt int64, maxChatID ...int) error {

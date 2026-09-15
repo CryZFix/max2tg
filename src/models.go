@@ -161,6 +161,9 @@ type Config struct {
 	DBPath       string `yaml:"db_path"`
 	LogPath      string `yaml:"log_path"`
 	DownloadPath string `yaml:"download_path"`
+	// MobileSessionFile is retained for the optional legacy mobile-login helper.
+	// Native voice forwarding uses the configured web token.
+	MobileSessionFile string `yaml:"mobile_session_file"`
 
 	Timezone             string `yaml:"timezone"`
 	SyncHistoryDepth     int    `yaml:"sync_history_depth"`

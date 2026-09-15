@@ -666,9 +666,10 @@ func SyncChatHistory(client *src.Client, db *src.Database, sender *src.TelegramS
 }
 
 func main() {
-	configPath := "data/config.yml"
-	if len(os.Args) > 1 {
-		configPath = os.Args[1]
+	configPath, mobileLogin, mobileDebug, err := parseStartupArgs(os.Args[1:])
+	if err != nil {
+		fmt.Printf("%v\nUsage: max2tg [config.yml] | max2tg mobile-login [--debug] [config.yml]\n", err)
+		os.Exit(2)
 	}
 
 	cfg, err := src.LoadConfig(configPath)
@@ -682,7 +683,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer src.CloseLogger()
-
+	if mobileLogin {
+		if err := src.LoginMobileSessionWithOptions(cfg, os.Stdin, os.Stdout, src.MobileLoginOptions{Debug: mobileDebug}); err != nil {
+			fmt.Printf("Mobile login failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	src.Logf("Starting %s...", src.GetVersionInfo())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -786,4 +793,32 @@ func main() {
 	go telegramSender.StartPolling(client, db)
 
 	select {}
+}
+
+func parseStartupArgs(args []string) (configPath string, mobileLogin, mobileDebug bool, err error) {
+	configPath = "data/config.yml"
+	if len(args) == 0 {
+		return configPath, false, false, nil
+	}
+	if args[0] != "mobile-login" {
+		if len(args) != 1 {
+			return "", false, false, fmt.Errorf("unexpected arguments")
+		}
+		return args[0], false, false, nil
+	}
+	mobileLogin = true
+	for _, arg := range args[1:] {
+		switch arg {
+		case "--debug":
+			mobileDebug = true
+		case "--help", "-h":
+			return "", false, false, fmt.Errorf("help requested")
+		default:
+			if strings.HasPrefix(arg, "-") || configPath != "data/config.yml" {
+				return "", false, false, fmt.Errorf("unexpected argument %q", arg)
+			}
+			configPath = arg
+		}
+	}
+	return configPath, mobileLogin, mobileDebug, nil
 }

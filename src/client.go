@@ -25,6 +25,10 @@ type Client struct {
 	connectedHandlers       []func()
 	fromWebSocketHandlers   []func(string)
 	toWebSocketHandlers     []func(string)
+	attachReady             chan attachNotification
+	mediaMu                 sync.Mutex
+	localCIDs               map[int]time.Time
+	localCIDMu              sync.Mutex
 
 	mu       sync.RWMutex
 	running  bool
@@ -32,9 +36,11 @@ type Client struct {
 }
 
 func NewClient(config *Config) *Client {
-	return &Client{
+	client := &Client{
 		config:                  config,
 		connection:              NewConnection(config, nil),
+		attachReady:             make(chan attachNotification, 16),
+		localCIDs:               make(map[int]time.Time),
 		me:                      nil,
 		chats:                   []Chat{},
 		messageHandlers:         []func(Message){},
@@ -49,6 +55,9 @@ func NewClient(config *Config) *Client {
 		fromWebSocketHandlers:   []func(string){},
 		toWebSocketHandlers:     []func(string){},
 	}
+	client.connection.client = client
+	client.initAttachNotifications()
+	return client
 }
 
 func (c *Client) OnMessage(handler func(Message)) {
@@ -265,6 +274,10 @@ func (c *Client) handleMessage(messageData map[string]interface{}) {
 	}
 
 	msg := parseMessage(messagePayload, int(chatID))
+	if msg.CID != nil && c.consumeLocalCID(*msg.CID) {
+		Logf("Ignoring local MAX echo for cid %d", *msg.CID)
+		return
+	}
 
 	switch msg.Status {
 	case MessageStatusNORMAL:
@@ -280,6 +293,34 @@ func (c *Client) handleMessage(messageData map[string]interface{}) {
 			handler(msg)
 		}
 	}
+}
+
+const localCIDTTL = 5 * time.Minute
+
+// markLocalCID records a client-generated id before sending to MAX. MAX may
+// publish the resulting message before the caller has persisted its Telegram
+// to MAX mapping, so this prevents the notification from being bridged back.
+func (c *Client) markLocalCID(cid int) {
+	c.localCIDMu.Lock()
+	defer c.localCIDMu.Unlock()
+	now := time.Now()
+	for pendingCID, expiresAt := range c.localCIDs {
+		if !expiresAt.After(now) {
+			delete(c.localCIDs, pendingCID)
+		}
+	}
+	c.localCIDs[cid] = now.Add(localCIDTTL)
+}
+
+func (c *Client) consumeLocalCID(cid int) bool {
+	c.localCIDMu.Lock()
+	defer c.localCIDMu.Unlock()
+	expiresAt, found := c.localCIDs[cid]
+	if !found {
+		return false
+	}
+	delete(c.localCIDs, cid)
+	return expiresAt.After(time.Now())
 }
 
 func (c *Client) Stop() error {
@@ -399,6 +440,63 @@ func (c *Client) GetMessages(chatID int, backward, forward int, fromTime *int64)
 	}
 
 	return messages, nil
+}
+
+// EditMessage replaces a MAX message's text while retaining its current
+// attachments. MAX requires the attachments field even for text-only edits.
+func (c *Client) EditMessage(chatID int, messageID int64, text string) error {
+	if !c.connection.IsConnected() {
+		return NewConnectionError("WebSocket not connected")
+	}
+
+	getRequest := c.connection.GetRequestBuilder().GetMessage(chatID, messageID)
+	getResponse, err := c.connection.sendAndReceive(getRequest, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	getPayload, err := responsePayload(getResponse, GET_MESSAGE)
+	if err != nil {
+		return err
+	}
+	messages, ok := getPayload["messages"].([]interface{})
+	if !ok || len(messages) != 1 {
+		return NewInvalidResponseError("MAX message lookup returned no message")
+	}
+	message, ok := messages[0].(map[string]interface{})
+	if !ok {
+		return NewInvalidResponseError("MAX message lookup returned an invalid message")
+	}
+	attachments := []interface{}{}
+	if rawAttachments, found := message["attaches"]; found {
+		var ok bool
+		attachments, ok = rawAttachments.([]interface{})
+		if !ok {
+			return NewInvalidResponseError("MAX message lookup returned invalid attachments")
+		}
+	}
+
+	editRequest := c.connection.GetRequestBuilder().EditMessage(chatID, messageID, text, attachments)
+	editResponse, err := c.connection.sendAndReceive(editRequest, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	_, err = responsePayload(editResponse, EDIT_MESSAGE)
+	return err
+}
+
+// DeleteMessage removes one message for all MAX chat participants. Callers
+// must ensure the message ID was explicitly selected by an authorized user.
+func (c *Client) DeleteMessage(chatID int, messageID int64) error {
+	if !c.connection.IsConnected() {
+		return NewConnectionError("WebSocket not connected")
+	}
+	request := c.connection.GetRequestBuilder().DeleteMessage(chatID, messageID)
+	response, err := c.connection.sendAndReceive(request, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	_, err = responsePayload(response, DELETE_MESSAGE)
+	return err
 }
 
 func (c *Client) SubscribeToChat(chatID int) error {

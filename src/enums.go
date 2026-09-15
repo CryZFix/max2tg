@@ -17,8 +17,15 @@ const (
 	GET_MESSAGES   Opcode = 49
 	SUBSCRIBE_CHAT Opcode = 75
 	SEND_MESSAGE   Opcode = 64
+	DELETE_MESSAGE Opcode = 66
+	EDIT_MESSAGE   Opcode = 67
+	GET_MESSAGE    Opcode = 71
 	GET_VIDEO      Opcode = 83
 	GET_FILE       Opcode = 88
+	IMAGE_UPLOAD   Opcode = 80
+	VIDEO_UPLOAD   Opcode = 82
+	FILE_UPLOAD    Opcode = 87
+	NOTIF_ATTACH   Opcode = 136
 	ON_MESSAGE     Opcode = 128
 	SET_REACTION   Opcode = 178
 )
