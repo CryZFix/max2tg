@@ -165,6 +165,10 @@ type Config struct {
 	// Native voice forwarding uses the configured web token.
 	MobileSessionFile string `yaml:"mobile_session_file"`
 
+	DownloadMaxAge          time.Duration `yaml:"download_max_age"`
+	DownloadMaxSizeMB       int           `yaml:"download_max_size_mb"`
+	DownloadCleanupInterval time.Duration `yaml:"download_cleanup_interval"`
+
 	Timezone             string `yaml:"timezone"`
 	SyncHistoryDepth     int    `yaml:"sync_history_depth"`
 	SaveDeleted          bool   `yaml:"save_deleted"`
