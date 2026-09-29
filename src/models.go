@@ -164,6 +164,7 @@ type Config struct {
 	// MobileSessionFile is retained for the optional legacy mobile-login helper.
 	// Native voice forwarding uses the configured web token.
 	MobileSessionFile string `yaml:"mobile_session_file"`
+	SaveMedia         bool   `yaml:"save_media"`
 
 	DownloadMaxAge          time.Duration `yaml:"download_max_age"`
 	DownloadMaxSizeMB       int           `yaml:"download_max_size_mb"`
@@ -189,6 +190,11 @@ type Config struct {
 	UserAgent    *UserAgentConfig `yaml:"user_agent"`
 	VideoHeaders string           `yaml:"video_headers"`
 	AudioHeaders string           `yaml:"audio_headers"`
+}
+
+type MediaFile struct {
+	Name string
+	Data []byte
 }
 
 func (c *Config) GetTimezone() *time.Location {

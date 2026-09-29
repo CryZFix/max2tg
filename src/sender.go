@@ -7,7 +7,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -313,7 +312,7 @@ func (s *TelegramSender) sendMessageWithoutTopic(text string, route *ChatRoute, 
 	return 0, fmt.Errorf("failed to send message without topic after %d retries: %w", s.maxRetries, lastErr)
 }
 
-func (s *TelegramSender) SendMediaGroup(files []string, caption string, maxChatID int, replyToMessageID *int) ([]int, error) {
+func (s *TelegramSender) SendMediaGroup(files []*MediaFile, caption string, maxChatID int, replyToMessageID *int) ([]int, error) {
 	route := s.FindRoute(maxChatID)
 	if route == nil {
 		return nil, fmt.Errorf("no route found for MAX chat ID %d", maxChatID)
@@ -357,7 +356,7 @@ func (s *TelegramSender) SendMediaGroup(files []string, caption string, maxChatI
 		media := []map[string]string{}
 		for i, file := range files {
 			media = append(media, map[string]string{
-				"type":  s.getMediaType(file),
+				"type":  s.getMediaType(file.Name),
 				"media": fmt.Sprintf("attach://file%d", i),
 			})
 		}
@@ -371,16 +370,11 @@ func (s *TelegramSender) SendMediaGroup(files []string, caption string, maxChatI
 		writer.WriteField("media", string(mediaJSON))
 
 		for i, file := range files {
-			part, err := writer.CreateFormFile(fmt.Sprintf("file%d", i), filepath.Base(file))
+			part, err := writer.CreateFormFile(fmt.Sprintf("file%d", i), file.Name)
 			if err != nil {
 				return nil, err
 			}
-			f, err := os.Open(file)
-			if err != nil {
-				return nil, err
-			}
-			defer f.Close()
-			io.Copy(part, f)
+			part.Write(file.Data)
 		}
 
 		writer.Close()
@@ -443,7 +437,7 @@ func (s *TelegramSender) SendMediaGroup(files []string, caption string, maxChatI
 	return nil, fmt.Errorf("failed to send media group after %d attempts: %w", s.maxRetries, lastErr)
 }
 
-func (s *TelegramSender) SendAudio(filePath string, caption string, maxChatID int, replyToMessageID *int) (int, error) {
+func (s *TelegramSender) SendAudio(file *MediaFile, caption string, maxChatID int, replyToMessageID *int) (int, error) {
 	route := s.FindRoute(maxChatID)
 	if route == nil {
 		return 0, fmt.Errorf("no route found for MAX chat ID %d", maxChatID)
@@ -487,16 +481,11 @@ func (s *TelegramSender) SendAudio(filePath string, caption string, maxChatID in
 			writer.WriteField("reply_to_message_id", fmt.Sprintf("%d", *replyToMessageID))
 		}
 
-		part, err := writer.CreateFormFile(fieldName, filepath.Base(filePath))
+		part, err := writer.CreateFormFile(fieldName, file.Name)
 		if err != nil {
 			return 0, err
 		}
-		f, err := os.Open(filePath)
-		if err != nil {
-			return 0, err
-		}
-		defer f.Close()
-		io.Copy(part, f)
+		part.Write(file.Data)
 		writer.Close()
 
 		resp, err := s.httpClient.Post(url, writer.FormDataContentType(), &buf)
@@ -552,7 +541,7 @@ func (s *TelegramSender) SendAudio(filePath string, caption string, maxChatID in
 	return 0, fmt.Errorf("failed to send audio after %d retries: %w", s.maxRetries, lastErr)
 }
 
-func (s *TelegramSender) SendVoice(filePath string, maxChatID int, replyToMessageID *int, duration int) (int, error) {
+func (s *TelegramSender) SendVoice(file *MediaFile, maxChatID int, replyToMessageID *int, duration int) (int, error) {
 	route := s.FindRoute(maxChatID)
 	if route == nil {
 		return 0, fmt.Errorf("no route found for MAX chat ID %d", maxChatID)
@@ -584,16 +573,11 @@ func (s *TelegramSender) SendVoice(filePath string, maxChatID int, replyToMessag
 			writer.WriteField("duration", fmt.Sprintf("%d", duration/1000))
 		}
 
-		part, err := writer.CreateFormFile("voice", filepath.Base(filePath))
+		part, err := writer.CreateFormFile("voice", file.Name)
 		if err != nil {
 			return 0, err
 		}
-		f, err := os.Open(filePath)
-		if err != nil {
-			return 0, err
-		}
-		defer f.Close()
-		io.Copy(part, f)
+		part.Write(file.Data)
 		writer.Close()
 
 		resp, err := s.httpClient.Post(url, writer.FormDataContentType(), &buf)
