@@ -24,6 +24,7 @@ type TelegramSender struct {
 	baseRetryDelay     time.Duration
 	config             *Config
 	httpClient         *http.Client
+	uploadClient       *http.Client
 	albumMu            sync.Mutex
 	albums             map[string]*telegramAlbum
 	localEditMu        sync.Mutex
@@ -52,6 +53,11 @@ func NewTelegramSender(botToken string, routes []ChatRoute, cfg *Config, db *Dat
 		Logf("Telegram HTTP client configured with SOCKS5 proxy %s:%d", tgProxy.Host, tgProxy.Port)
 	}
 
+	uploadClient, err := BuildHTTPClientWithProxy(tgProxy, mediaDownloadTimeout)
+	if err != nil {
+		uploadClient = &http.Client{Timeout: mediaDownloadTimeout}
+	}
+
 	sender := &TelegramSender{
 		botToken:           botToken,
 		routes:             routes,
@@ -62,6 +68,7 @@ func NewTelegramSender(botToken string, routes []ChatRoute, cfg *Config, db *Dat
 		baseRetryDelay:     cfg.BaseRetryDelay,
 		config:             cfg,
 		httpClient:         httpClient,
+		uploadClient:       uploadClient,
 		albums:             make(map[string]*telegramAlbum),
 		localEdits:         make(map[telegramEditKey]time.Time),
 	}
@@ -338,48 +345,42 @@ func (s *TelegramSender) SendMediaGroup(files []*MediaFile, caption string, maxC
 		startTime := time.Now()
 
 		url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMediaGroup", s.botToken)
-		var buf bytes.Buffer
-		writer := multipart.NewWriter(&buf)
-
-		writer.WriteField("chat_id", fmt.Sprintf("%d", route.TelegramChatID))
-		if route.TelegramTopicID > 0 {
-			writer.WriteField("message_thread_id", fmt.Sprintf("%d", route.TelegramTopicID))
-		}
-		if caption != "" {
-			writer.WriteField("caption", caption)
-			writer.WriteField("parse_mode", "HTML")
-		}
-		if replyToMessageID != nil {
-			writer.WriteField("reply_to_message_id", fmt.Sprintf("%d", *replyToMessageID))
-		}
-
-		media := []map[string]string{}
-		for i, file := range files {
-			media = append(media, map[string]string{
-				"type":  s.getMediaType(file.Name),
-				"media": fmt.Sprintf("attach://file%d", i),
-			})
-		}
-
-		if len(media) > 0 {
-			media[0]["caption"] = caption
-			media[0]["parse_mode"] = "HTML"
-		}
-
-		mediaJSON, _ := json.Marshal(media)
-		writer.WriteField("media", string(mediaJSON))
-
-		for i, file := range files {
-			part, err := writer.CreateFormFile(fmt.Sprintf("file%d", i), file.Name)
-			if err != nil {
-				return nil, err
+		resp, err := s.postMultipart(url, func(writer *multipart.Writer) error {
+			writer.WriteField("chat_id", fmt.Sprintf("%d", route.TelegramChatID))
+			if route.TelegramTopicID > 0 {
+				writer.WriteField("message_thread_id", fmt.Sprintf("%d", route.TelegramTopicID))
 			}
-			part.Write(file.Data)
-		}
+			if caption != "" {
+				writer.WriteField("caption", caption)
+				writer.WriteField("parse_mode", "HTML")
+			}
+			if replyToMessageID != nil {
+				writer.WriteField("reply_to_message_id", fmt.Sprintf("%d", *replyToMessageID))
+			}
 
-		writer.Close()
+			media := []map[string]string{}
+			for i, file := range files {
+				media = append(media, map[string]string{
+					"type":  s.getMediaType(file),
+					"media": fmt.Sprintf("attach://file%d", i),
+				})
+			}
 
-		resp, err := s.httpClient.Post(url, writer.FormDataContentType(), &buf)
+			if len(media) > 0 {
+				media[0]["caption"] = caption
+				media[0]["parse_mode"] = "HTML"
+			}
+
+			mediaJSON, _ := json.Marshal(media)
+			writer.WriteField("media", string(mediaJSON))
+
+			for i, file := range files {
+				if err := writeMediaPart(writer, fmt.Sprintf("file%d", i), file); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 		if err != nil {
 			lastErr = err
 			continue
@@ -466,29 +467,21 @@ func (s *TelegramSender) SendAudio(file *MediaFile, caption string, maxChatID in
 		fieldName := "audio"
 
 		url := fmt.Sprintf("https://api.telegram.org/bot%s/%s", s.botToken, endpoint)
-		var buf bytes.Buffer
-		writer := multipart.NewWriter(&buf)
+		resp, err := s.postMultipart(url, func(writer *multipart.Writer) error {
+			writer.WriteField("chat_id", fmt.Sprintf("%d", route.TelegramChatID))
+			if route.TelegramTopicID > 0 {
+				writer.WriteField("message_thread_id", fmt.Sprintf("%d", route.TelegramTopicID))
+			}
+			if caption != "" {
+				writer.WriteField("caption", caption)
+				writer.WriteField("parse_mode", "HTML")
+			}
+			if replyToMessageID != nil {
+				writer.WriteField("reply_to_message_id", fmt.Sprintf("%d", *replyToMessageID))
+			}
 
-		writer.WriteField("chat_id", fmt.Sprintf("%d", route.TelegramChatID))
-		if route.TelegramTopicID > 0 {
-			writer.WriteField("message_thread_id", fmt.Sprintf("%d", route.TelegramTopicID))
-		}
-		if caption != "" {
-			writer.WriteField("caption", caption)
-			writer.WriteField("parse_mode", "HTML")
-		}
-		if replyToMessageID != nil {
-			writer.WriteField("reply_to_message_id", fmt.Sprintf("%d", *replyToMessageID))
-		}
-
-		part, err := writer.CreateFormFile(fieldName, file.Name)
-		if err != nil {
-			return 0, err
-		}
-		part.Write(file.Data)
-		writer.Close()
-
-		resp, err := s.httpClient.Post(url, writer.FormDataContentType(), &buf)
+			return writeMediaPart(writer, fieldName, file)
+		})
 		if err != nil {
 			lastErr = err
 			continue
@@ -559,28 +552,20 @@ func (s *TelegramSender) SendVoice(file *MediaFile, maxChatID int, replyToMessag
 		startTime := time.Now()
 
 		url := fmt.Sprintf("https://api.telegram.org/bot%s/sendVoice", s.botToken)
-		var buf bytes.Buffer
-		writer := multipart.NewWriter(&buf)
+		resp, err := s.postMultipart(url, func(writer *multipart.Writer) error {
+			writer.WriteField("chat_id", fmt.Sprintf("%d", route.TelegramChatID))
+			if route.TelegramTopicID > 0 {
+				writer.WriteField("message_thread_id", fmt.Sprintf("%d", route.TelegramTopicID))
+			}
+			if replyToMessageID != nil {
+				writer.WriteField("reply_to_message_id", fmt.Sprintf("%d", *replyToMessageID))
+			}
+			if duration > 0 {
+				writer.WriteField("duration", fmt.Sprintf("%d", duration/1000))
+			}
 
-		writer.WriteField("chat_id", fmt.Sprintf("%d", route.TelegramChatID))
-		if route.TelegramTopicID > 0 {
-			writer.WriteField("message_thread_id", fmt.Sprintf("%d", route.TelegramTopicID))
-		}
-		if replyToMessageID != nil {
-			writer.WriteField("reply_to_message_id", fmt.Sprintf("%d", *replyToMessageID))
-		}
-		if duration > 0 {
-			writer.WriteField("duration", fmt.Sprintf("%d", duration/1000))
-		}
-
-		part, err := writer.CreateFormFile("voice", file.Name)
-		if err != nil {
-			return 0, err
-		}
-		part.Write(file.Data)
-		writer.Close()
-
-		resp, err := s.httpClient.Post(url, writer.FormDataContentType(), &buf)
+			return writeMediaPart(writer, "voice", file)
+		})
 		if err != nil {
 			lastErr = err
 			continue
@@ -628,10 +613,47 @@ func (s *TelegramSender) SendVoice(file *MediaFile, maxChatID int, replyToMessag
 	return 0, fmt.Errorf("failed to send voice after %d retries: %w", s.maxRetries, lastErr)
 }
 
-func (s *TelegramSender) getMediaType(filePath string) string {
-	ext := strings.ToLower(filepath.Ext(filePath))
+func (s *TelegramSender) postMultipart(url string, build func(writer *multipart.Writer) error) (*http.Response, error) {
+	reader, pipeWriter := io.Pipe()
+	writer := multipart.NewWriter(pipeWriter)
+	contentType := writer.FormDataContentType()
+
+	go func() {
+		err := build(writer)
+		if err == nil {
+			err = writer.Close()
+		}
+		pipeWriter.CloseWithError(err)
+	}()
+
+	resp, err := s.uploadClient.Post(url, contentType, reader)
+	reader.Close()
+	return resp, err
+}
+
+func writeMediaPart(writer *multipart.Writer, fieldName string, file *MediaFile) error {
+	part, err := writer.CreateFormFile(fieldName, file.Name)
+	if err != nil {
+		return err
+	}
+
+	reader, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	_, err = io.Copy(part, reader)
+	return err
+}
+
+func (s *TelegramSender) getMediaType(file *MediaFile) string {
+	ext := strings.ToLower(filepath.Ext(file.Name))
 	switch ext {
 	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
+		if file.Size > TelegramPhotoSizeLimit {
+			return "document"
+		}
 		return "photo"
 	case ".mp4", ".avi", ".mov", ".mkv":
 		return "video"
