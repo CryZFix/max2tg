@@ -175,6 +175,10 @@ type Config struct {
 	SaveDeleted          bool   `yaml:"save_deleted"`
 	TruncateLongMessages bool   `yaml:"truncate_long_messages"`
 
+	TelegramAPIURL       string `yaml:"telegram_api_url"`
+	TelegramFileLimitMB  int    `yaml:"telegram_file_size_limit_mb"`
+	TelegramPhotoLimitMB int    `yaml:"telegram_photo_size_limit_mb"`
+
 	DefaultGroupChatID int64       `yaml:"default_group"`
 	ChatRoutes         []ChatRoute `yaml:"chats"`
 
@@ -190,6 +194,14 @@ type Config struct {
 	UserAgent    *UserAgentConfig `yaml:"user_agent"`
 	VideoHeaders string           `yaml:"video_headers"`
 	AudioHeaders string           `yaml:"audio_headers"`
+}
+
+func (c *Config) GetTelegramFileSizeLimit() int64 {
+	return int64(c.TelegramFileLimitMB) * 1024 * 1024
+}
+
+func (c *Config) GetTelegramPhotoSizeLimit() int64 {
+	return int64(c.TelegramPhotoLimitMB) * 1024 * 1024
 }
 
 func (c *Config) GetTimezone() *time.Location {

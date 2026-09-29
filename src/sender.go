@@ -53,9 +53,10 @@ func NewTelegramSender(botToken string, routes []ChatRoute, cfg *Config, db *Dat
 		Logf("Telegram HTTP client configured with SOCKS5 proxy %s:%d", tgProxy.Host, tgProxy.Port)
 	}
 
-	uploadClient, err := BuildHTTPClientWithProxy(tgProxy, mediaDownloadTimeout)
+	uploadTimeout := mediaTimeout(cfg.GetTelegramFileSizeLimit())
+	uploadClient, err := BuildHTTPClientWithProxy(tgProxy, uploadTimeout)
 	if err != nil {
-		uploadClient = &http.Client{Timeout: mediaDownloadTimeout}
+		uploadClient = &http.Client{Timeout: uploadTimeout}
 	}
 
 	sender := &TelegramSender{
@@ -103,6 +104,10 @@ func isRateLimitError(body string) (*RateLimitError, bool) {
 		return &RateLimitError{RetryAfter: retryAfter + 1}, true
 	}
 	return nil, false
+}
+
+func (s *TelegramSender) apiURL(method string) string {
+	return fmt.Sprintf("%s/bot%s/%s", s.config.TelegramAPIURL, s.botToken, method)
 }
 
 func (s *TelegramSender) FindRoute(maxChatID int) *ChatRoute {
@@ -172,7 +177,7 @@ func (s *TelegramSender) SendMessage(text string, maxChatID int, replyToMessageI
 
 		startTime := time.Now()
 
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", s.botToken)
+		url := s.apiURL("sendMessage")
 		payload := map[string]interface{}{
 			"chat_id":    route.TelegramChatID,
 			"text":       text,
@@ -344,7 +349,7 @@ func (s *TelegramSender) SendMediaGroup(files []*MediaFile, caption string, maxC
 
 		startTime := time.Now()
 
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMediaGroup", s.botToken)
+		url := s.apiURL("sendMediaGroup")
 		resp, err := s.postMultipart(url, func(writer *multipart.Writer) error {
 			writer.WriteField("chat_id", fmt.Sprintf("%d", route.TelegramChatID))
 			if route.TelegramTopicID > 0 {
@@ -466,7 +471,7 @@ func (s *TelegramSender) SendAudio(file *MediaFile, caption string, maxChatID in
 		endpoint := "sendAudio"
 		fieldName := "audio"
 
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/%s", s.botToken, endpoint)
+		url := s.apiURL(endpoint)
 		resp, err := s.postMultipart(url, func(writer *multipart.Writer) error {
 			writer.WriteField("chat_id", fmt.Sprintf("%d", route.TelegramChatID))
 			if route.TelegramTopicID > 0 {
@@ -551,7 +556,7 @@ func (s *TelegramSender) SendVoice(file *MediaFile, maxChatID int, replyToMessag
 
 		startTime := time.Now()
 
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/sendVoice", s.botToken)
+		url := s.apiURL("sendVoice")
 		resp, err := s.postMultipart(url, func(writer *multipart.Writer) error {
 			writer.WriteField("chat_id", fmt.Sprintf("%d", route.TelegramChatID))
 			if route.TelegramTopicID > 0 {
@@ -651,7 +656,7 @@ func (s *TelegramSender) getMediaType(file *MediaFile) string {
 	ext := strings.ToLower(filepath.Ext(file.Name))
 	switch ext {
 	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
-		if file.Size > TelegramPhotoSizeLimit {
+		if file.Size > s.config.GetTelegramPhotoSizeLimit() {
 			return "document"
 		}
 		return "photo"
@@ -683,7 +688,7 @@ func (s *TelegramSender) EditMessageText(messageID int, text string, maxChatID i
 			time.Sleep(retryDelay)
 		}
 
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", s.botToken)
+		url := s.apiURL("editMessageText")
 
 		payload := map[string]interface{}{
 			"chat_id":    route.TelegramChatID,
@@ -765,7 +770,7 @@ func (s *TelegramSender) EditMessageCaption(messageID int, caption string, maxCh
 			time.Sleep(retryDelay)
 		}
 
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageCaption", s.botToken)
+		url := s.apiURL("editMessageCaption")
 
 		payload := map[string]interface{}{
 			"chat_id":    route.TelegramChatID,
@@ -839,7 +844,7 @@ func (s *TelegramSender) DeleteMessage(messageID int, maxChatID int) error {
 			time.Sleep(retryDelay)
 		}
 
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage", s.botToken)
+		url := s.apiURL("deleteMessage")
 
 		payload := map[string]interface{}{
 			"chat_id":    route.TelegramChatID,
@@ -1070,7 +1075,7 @@ func (s *TelegramSender) SendDebugMessage(text string, userID int64) error {
 	if userID == 0 {
 		return nil
 	}
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", s.botToken)
+	url := s.apiURL("sendMessage")
 
 	payload := map[string]interface{}{
 		"chat_id": userID,
