@@ -84,7 +84,7 @@ func mediaReference(message TelegramMessage) (telegramMediaRef, bool) {
 }
 
 func (s *TelegramSender) getTelegramFile(fileID string) (string, error) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/getFile", s.botToken)
+	url := s.apiURL("getFile")
 	payload, _ := json.Marshal(map[string]string{"file_id": fileID})
 	resp, err := s.httpClient.Post(url, "application/json", strings.NewReader(string(payload)))
 	if err != nil {
@@ -137,7 +137,7 @@ func (s *TelegramSender) downloadTelegramMedia(messages []TelegramMessage) ([]Me
 		}
 		path := temp.Name()
 		files = append(files, path)
-		response, err := s.httpClient.Get(fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", s.botToken, remotePath))
+		response, err := s.httpClient.Get(s.fileURL(remotePath))
 		if err != nil {
 			temp.Close()
 			cleanup()

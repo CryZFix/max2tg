@@ -110,6 +110,10 @@ func (s *TelegramSender) apiURL(method string) string {
 	return fmt.Sprintf("%s/bot%s/%s", s.config.TelegramAPIURL, s.botToken, method)
 }
 
+func (s *TelegramSender) fileURL(remotePath string) string {
+	return fmt.Sprintf("%s/file/bot%s/%s", s.config.TelegramAPIURL, s.botToken, remotePath)
+}
+
 func (s *TelegramSender) FindRoute(maxChatID int) *ChatRoute {
 	for i := range s.routes {
 		if s.routes[i].MaxChatID == maxChatID {
@@ -901,7 +905,7 @@ func (s *TelegramSender) DeleteMessage(messageID int, maxChatID int) error {
 }
 
 func (s *TelegramSender) CreateForumTopic(name string) (int, error) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/createForumTopic", s.botToken)
+	url := s.apiURL("createForumTopic")
 
 	if len(name) > 128 {
 		name = name[:128]
@@ -1195,7 +1199,7 @@ func (s *TelegramSender) StartPolling(client *Client, db *Database) {
 	Logf("Starting Telegram polling for reverse messages...")
 
 	for {
-		updates, err := pollUpdates(pollClient, s.botToken, offset, 25)
+		updates, err := pollUpdates(pollClient, s.apiURL("getUpdates"), offset, 25)
 		if err != nil {
 			Logf("Telegram polling error: %v", err)
 			time.Sleep(5 * time.Second)
@@ -1221,8 +1225,7 @@ func (s *TelegramSender) StartPolling(client *Client, db *Database) {
 	}
 }
 
-func pollUpdates(httpClient *http.Client, botToken string, offset int, timeout int) ([]TelegramUpdate, error) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates", botToken)
+func pollUpdates(httpClient *http.Client, url string, offset int, timeout int) ([]TelegramUpdate, error) {
 	payload := map[string]interface{}{
 		"offset":          offset,
 		"timeout":         timeout,
