@@ -40,8 +40,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/mochensky/max2tg:${{ inputs.version }}
-            ghcr.io/mochensky/max2tg:latest
+            ghcr.io/cryzfix/max2tg:${{ inputs.version }}
+            ghcr.io/cryzfix/max2tg:latest
 
   build-and-release:
     needs: docker
