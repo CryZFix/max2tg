@@ -17,7 +17,7 @@ A bridge between [MAX](https://max.ru) messenger and [Telegram](https://telegram
 - **Auto-reconnect** — on connection loss, the bot reconnects with exponential backoff.
 - **Debug notifications** — optionally sends personal Telegram messages on disconnect and reconnect.
 - **Logging** — each run writes a separate log file.
-- **Streaming media transfer** — by default, media from MAX is streamed to Telegram without writing it to disk; saving can be enabled in the settings.
+- **Streaming media transfer** — media is streamed in both directions without temporary files. MAX → Telegram saving can optionally be enabled in the settings.
 - **Download cleanup** — downloaded media can be deleted automatically by age or by a folder size limit.
 - **Docker** — a ready-made image and `docker-compose.yml` for quick deployment.
 
@@ -312,7 +312,7 @@ ping_timeout: 1m30s
 
 ### Saving media to disk
 
-By default (`save_media: false`) media from MAX is streamed directly to Telegram without being saved to disk. The download folder stays empty and RAM usage does not grow with the full media size.
+By default (`save_media: false`) media from MAX is streamed directly to Telegram without being saved to disk. Telegram → MAX media is always streamed directly and never creates temporary files. The download folder stays empty and RAM usage does not grow with the full media size.
 
 If you want to keep copies of all media, enable saving:
 

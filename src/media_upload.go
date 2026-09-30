@@ -1,14 +1,12 @@
 package src
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
-	"os"
-	"path/filepath"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -25,10 +23,18 @@ const (
 )
 
 type MediaUpload struct {
-	Path       string
 	Name       string
+	Size       int64
 	Kind       MaxMediaKind
 	DurationMS int
+	OpenStream func() (io.ReadCloser, error)
+}
+
+func (m MediaUpload) Open() (io.ReadCloser, error) {
+	if m.OpenStream == nil {
+		return nil, errors.New("media source is unavailable")
+	}
+	return m.OpenStream()
 }
 
 type attachNotification struct {
@@ -186,29 +192,84 @@ func findPhotoAttachment(value interface{}) (interface{}, string, bool) {
 	return nil, "", false
 }
 
-func (c *Client) postFile(uploadURL, path, name string) (map[string]interface{}, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
+type byteCounter int64
+
+func (c *byteCounter) Write(p []byte) (int, error) {
+	*c += byteCounter(len(p))
+	return len(p), nil
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
 	}
-	defer file.Close()
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
+	return len(p), nil
+}
+
+func multipartUploadSize(boundary, name string, size int64) (int64, error) {
+	if size <= 0 {
+		return 0, errors.New("media size must be positive")
+	}
+	var counter byteCounter
+	writer := multipart.NewWriter(&counter)
+	if err := writer.SetBoundary(boundary); err != nil {
+		return 0, err
+	}
 	part, err := writer.CreateFormFile("file", name)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	if _, err := io.Copy(part, file); err != nil {
-		return nil, err
+	if _, err := io.Copy(part, io.LimitReader(zeroReader{}, size)); err != nil {
+		return 0, err
 	}
 	if err := writer.Close(); err != nil {
+		return 0, err
+	}
+	return int64(counter), nil
+}
+
+func (c *Client) postFile(uploadURL string, media MediaUpload) (map[string]interface{}, error) {
+	boundary := fmt.Sprintf("max2tg-%d", time.Now().UnixNano())
+	contentLength, err := multipartUploadSize(boundary, media.Name, media.Size)
+	if err != nil {
 		return nil, err
 	}
+	file, err := media.Open()
+	if err != nil {
+		return nil, err
+	}
+
+	reader, writer := io.Pipe()
+	go func() {
+		defer file.Close()
+		multipartWriter := multipart.NewWriter(writer)
+		if err := multipartWriter.SetBoundary(boundary); err != nil {
+			_ = writer.CloseWithError(err)
+			return
+		}
+		part, err := multipartWriter.CreateFormFile("file", media.Name)
+		if err == nil {
+			_, err = io.Copy(part, file)
+		}
+		if closeErr := multipartWriter.Close(); err == nil {
+			err = closeErr
+		}
+		_ = writer.CloseWithError(err)
+	}()
+
 	httpClient, err := BuildHTTPClientWithProxy(GetMaxProxy(c.config), 60*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := httpClient.Post(uploadURL, writer.FormDataContentType(), &body)
+	req, err := http.NewRequest(http.MethodPost, uploadURL, reader)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.ContentLength = contentLength
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -223,11 +284,10 @@ func (c *Client) postFile(uploadURL, path, name string) (map[string]interface{},
 }
 
 func (c *Client) uploadFileAttachment(media MediaUpload) (map[string]interface{}, error) {
-	info, err := os.Stat(media.Path)
-	if err != nil {
-		return nil, err
+	if media.Size <= 0 {
+		return nil, errors.New("media size must be positive")
 	}
-	request := c.connection.GetRequestBuilder().FileUpload(media.Name, info.Size())
+	request := c.connection.GetRequestBuilder().FileUpload(media.Name, media.Size)
 	response, err := c.connection.sendAndReceive(request, 10*time.Second)
 	if err != nil {
 		return nil, err
@@ -245,7 +305,7 @@ func (c *Client) uploadFileAttachment(media MediaUpload) (map[string]interface{}
 		return nil, NewInvalidResponseError("MAX file upload URL is empty")
 	}
 	c.drainAttachNotifications()
-	if _, err := c.postFile(uploadURL, media.Path, media.Name); err != nil {
+	if _, err := c.postFile(uploadURL, media); err != nil {
 		return nil, err
 	}
 	fileID, ok := int64Value(upload, "fileId")
@@ -255,7 +315,7 @@ func (c *Client) uploadFileAttachment(media MediaUpload) (map[string]interface{}
 	if err := c.waitForAttach(fileID, "file"); err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{"_type": "FILE", "fileId": upload["fileId"], "token": stringValue(upload, "token"), "name": media.Name, "size": info.Size()}, nil
+	return map[string]interface{}{"_type": "FILE", "fileId": upload["fileId"], "token": stringValue(upload, "token"), "name": media.Name, "size": media.Size}, nil
 }
 
 // uploadNativeAttachment uses the documented URL opcodes. If a provider response
@@ -291,7 +351,7 @@ func (c *Client) uploadNativeAttachment(chatID int, media MediaUpload) (map[stri
 	if media.Kind == MaxMediaVideo {
 		c.drainAttachNotifications()
 	}
-	httpResult, err := c.postFile(uploadURL, media.Path, media.Name)
+	httpResult, err := c.postFile(uploadURL, media)
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +388,7 @@ func (c *Client) SendMediaMessage(chatID int, text string, media []MediaUpload, 
 	for _, item := range media {
 		item.Name = SanitizeFilename(item.Name)
 		if item.Name == "" {
-			item.Name = filepath.Base(item.Path)
+			item.Name = "file"
 		}
 		var attach map[string]interface{}
 		var err error

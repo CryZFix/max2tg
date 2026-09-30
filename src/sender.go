@@ -1426,12 +1426,11 @@ func (s *TelegramSender) forwardTelegramMessages(client *Client, db *Database, m
 		Logf("Forwarding message from Telegram chat %d to MAX chat %d: %s", tgChatID, route.MaxChatID, logText)
 	}
 
-	media, cleanup, err := s.downloadTelegramMedia(messages)
+	media, err := s.downloadTelegramMedia(messages)
 	if err != nil {
-		Logf("Failed to download Telegram media: %v", err)
+		Logf("Failed to prepare Telegram media: %v", err)
 		return
 	}
-	defer cleanup()
 	var maxMsgID int
 	if len(media) > 0 {
 		maxMsgID, err = client.SendMediaMessage(route.MaxChatID, text, media, replyToMaxID)

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -20,6 +18,7 @@ type telegramAlbum struct {
 
 type telegramRemoteFile struct {
 	FilePath string `json:"file_path"`
+	FileSize int64  `json:"file_size"`
 }
 
 type telegramMediaRef struct {
@@ -28,6 +27,7 @@ type telegramMediaRef struct {
 	mimeType string
 	kind     MaxMediaKind
 	duration int
+	size     int64
 }
 
 func (s *TelegramSender) enqueueAlbum(client *Client, db *Database, message TelegramMessage) {
@@ -57,7 +57,7 @@ func (s *TelegramSender) enqueueAlbum(client *Client, db *Database, message Tele
 func mediaReference(message TelegramMessage) (telegramMediaRef, bool) {
 	if len(message.Photo) > 0 {
 		photo := message.Photo[len(message.Photo)-1]
-		return telegramMediaRef{fileID: photo.FileID, name: fmt.Sprintf("photo-%d.jpg", message.MessageID), mimeType: "image/jpeg", kind: MaxMediaPhoto}, photo.FileID != ""
+		return telegramMediaRef{fileID: photo.FileID, name: fmt.Sprintf("photo-%d.jpg", message.MessageID), mimeType: "image/jpeg", kind: MaxMediaPhoto, size: photo.FileSize}, photo.FileID != ""
 	}
 	choices := []struct {
 		ref      *TelegramFileRef
@@ -78,87 +78,76 @@ func mediaReference(message TelegramMessage) (telegramMediaRef, bool) {
 		if name == "" {
 			name = choice.fallback
 		}
-		return telegramMediaRef{fileID: choice.ref.FileID, name: name, mimeType: choice.ref.MimeType, kind: choice.kind, duration: choice.ref.Duration}, true
+		return telegramMediaRef{fileID: choice.ref.FileID, name: name, mimeType: choice.ref.MimeType, kind: choice.kind, duration: choice.ref.Duration, size: choice.ref.FileSize}, true
 	}
 	return telegramMediaRef{}, false
 }
 
-func (s *TelegramSender) getTelegramFile(fileID string) (string, error) {
+func (s *TelegramSender) getTelegramFile(fileID string) (telegramRemoteFile, error) {
 	url := s.apiURL("getFile")
 	payload, _ := json.Marshal(map[string]string{"file_id": fileID})
 	resp, err := s.httpClient.Post(url, "application/json", strings.NewReader(string(payload)))
 	if err != nil {
-		return "", err
+		return telegramRemoteFile{}, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Telegram getFile: %s", string(body))
+		return telegramRemoteFile{}, fmt.Errorf("Telegram getFile: %s", string(body))
 	}
 	var result struct {
 		OK     bool               `json:"ok"`
 		Result telegramRemoteFile `json:"result"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", err
+		return telegramRemoteFile{}, err
 	}
 	if !result.OK || result.Result.FilePath == "" {
-		return "", fmt.Errorf("Telegram getFile returned no file path")
+		return telegramRemoteFile{}, fmt.Errorf("Telegram getFile returned no file path")
 	}
-	return result.Result.FilePath, nil
+	return result.Result, nil
 }
 
-func (s *TelegramSender) downloadTelegramMedia(messages []TelegramMessage) ([]MediaUpload, func(), error) {
-	var files []string
-	cleanup := func() {
-		for _, file := range files {
-			_ = os.Remove(file)
-		}
-	}
+func (s *TelegramSender) downloadTelegramMedia(messages []TelegramMessage) ([]MediaUpload, error) {
 	var result []MediaUpload
 	for _, message := range messages {
 		ref, ok := mediaReference(message)
 		if !ok {
 			continue
 		}
-		remotePath, err := s.getTelegramFile(ref.fileID)
+		remote, err := s.getTelegramFile(ref.fileID)
 		if err != nil {
-			cleanup()
-			return nil, func() {}, err
+			return nil, err
 		}
 		name := SanitizeFilename(ref.name)
 		if name == "" {
 			name = fmt.Sprintf("telegram-%d", message.MessageID)
 		}
-		temp, err := os.CreateTemp(s.config.DownloadPath, "tg-upload-*")
-		if err != nil {
-			cleanup()
-			return nil, func() {}, err
+		size := ref.size
+		if remote.FileSize > 0 {
+			size = remote.FileSize
 		}
-		path := temp.Name()
-		files = append(files, path)
-		response, err := s.httpClient.Get(s.fileURL(remotePath))
-		if err != nil {
-			temp.Close()
-			cleanup()
-			return nil, func() {}, err
+		if size <= 0 {
+			return nil, fmt.Errorf("Telegram file %s has no size", name)
 		}
-		_, copyErr := io.Copy(temp, response.Body)
-		response.Body.Close()
-		closeErr := temp.Close()
-		if copyErr != nil {
-			cleanup()
-			return nil, func() {}, copyErr
-		}
-		if closeErr != nil {
-			cleanup()
-			return nil, func() {}, closeErr
-		}
-		if info, err := os.Stat(path); err != nil || info.Size() == 0 {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("downloaded Telegram file %s is empty", name)
-		}
-		result = append(result, MediaUpload{Path: path, Name: filepath.Base(name), Kind: ref.kind, DurationMS: ref.duration * 1000})
+		remotePath := remote.FilePath
+		result = append(result, MediaUpload{
+			Name:       name,
+			Size:       size,
+			Kind:       ref.kind,
+			DurationMS: ref.duration * 1000,
+			OpenStream: func() (io.ReadCloser, error) {
+				response, err := s.httpClient.Get(s.fileURL(remotePath))
+				if err != nil {
+					return nil, err
+				}
+				if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+					response.Body.Close()
+					return nil, fmt.Errorf("Telegram file download returned HTTP %d", response.StatusCode)
+				}
+				return response.Body, nil
+			},
+		})
 	}
-	return result, cleanup, nil
+	return result, nil
 }

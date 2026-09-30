@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -47,14 +46,12 @@ func (c *Client) sendWebVoice(chatID int, text string, media MediaUpload, replyT
 	if c.config.UserAgent != nil {
 		userAgent = c.config.UserAgent.UserAgent
 	}
-	if err := c.postAudio(url, media.Path, userAgent); err != nil {
+	wave := audioWaveform(media)
+	if err := c.postAudio(url, media, userAgent); err != nil {
 		return c.sendVoiceAsFile(chatID, text, media, replyToMsgID, fmt.Errorf("web audio upload: %w", err))
 	}
 	duration := media.DurationMS
-	if measured, err := audioDurationMS(media.Path); err == nil && measured > 0 {
-		duration = measured
-	}
-	attach := map[string]interface{}{"_type": "AUDIO", "audioId": audioID, "duration": duration, "wave": audioWaveform(media.Path), "token": token}
+	attach := map[string]interface{}{"_type": "AUDIO", "audioId": audioID, "duration": duration, "wave": wave, "token": token}
 	cid := -time.Now().UnixMilli()
 	c.markLocalCID(int(cid))
 	message := map[string]interface{}{"cid": cid, "attaches": []interface{}{attach}}
@@ -106,15 +103,12 @@ func (c *Client) sendNativeVoice(chatID int, text string, media MediaUpload, rep
 	if url == "" || token == "" {
 		return c.sendVoiceAsFile(chatID, text, media, replyToMsgID, NewInvalidResponseError("audio upload slot is incomplete"))
 	}
-	if err := c.postNativeAudio(url, media.Path); err != nil {
+	wave := audioWaveform(media)
+	if err := c.postNativeAudio(url, media); err != nil {
 		return c.sendVoiceAsFile(chatID, text, media, replyToMsgID, err)
 	}
 
 	duration := media.DurationMS
-	if measured, err := audioDurationMS(media.Path); err == nil && measured > 0 {
-		duration = measured
-	}
-	wave := audioWaveform(media.Path)
 	attach := map[string]interface{}{"_type": "AUDIO", "token": token, "duration": duration, "wave": wave}
 	cid := -(time.Now().UnixMilli())
 	message := map[string]interface{}{"cid": cid, "text": text, "elements": []interface{}{}, "attaches": []interface{}{attach}}
@@ -161,23 +155,19 @@ func (c *Client) sendVoiceAsFile(chatID int, text string, media MediaUpload, rep
 	return ParseID(message["id"]), nil
 }
 
-func (c *Client) postNativeAudio(uploadURL, path string) error {
-	return c.postAudio(uploadURL, path, "OKMessages/"+mobileAppVersion+" (Android 14)")
+func (c *Client) postNativeAudio(uploadURL string, media MediaUpload) error {
+	return c.postAudio(uploadURL, media, "OKMessages/"+mobileAppVersion+" (Android 14)")
 }
 
-func (c *Client) postAudio(uploadURL, path, userAgent string) error {
-	file, err := os.Open(path)
+func (c *Client) postAudio(uploadURL string, media MediaUpload, userAgent string) error {
+	if media.Size <= 0 {
+		return fmt.Errorf("audio file is empty")
+	}
+	file, err := media.Open()
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	if info.Size() == 0 {
-		return fmt.Errorf("audio file is empty")
-	}
 	httpClient, err := BuildHTTPClientWithProxy(GetMaxProxy(c.config), 60*time.Second)
 	if err != nil {
 		return err
@@ -186,9 +176,10 @@ func (c *Client) postAudio(uploadURL, path, userAgent string) error {
 	if err != nil {
 		return err
 	}
+	req.ContentLength = media.Size
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%d", time.Now().UnixNano()))
-	req.Header.Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", info.Size()-1, info.Size()))
+	req.Header.Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", media.Size-1, media.Size))
 	if userAgent != "" {
 		req.Header.Set("User-Agent", userAgent)
 	}
@@ -205,22 +196,17 @@ func (c *Client) postAudio(uploadURL, path, userAgent string) error {
 	return nil
 }
 
-func audioDurationMS(path string) (int, error) {
-	output, err := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path).Output()
-	if err != nil {
-		return 0, err
-	}
-	seconds, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
-	if err != nil {
-		return 0, err
-	}
-	return int(seconds*1000 + .5), nil
-}
-
-func audioWaveform(path string) []byte {
+func audioWaveform(media MediaUpload) []byte {
 	// ffmpeg's s16le stream is portable and lets us generate MAX's 80 amplitude
-	// bytes without retaining the original audio in memory.
-	cmd := exec.Command("ffmpeg", "-v", "error", "-i", path, "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1")
+	// bytes without retaining the original audio in memory. The upload itself
+	// receives a freshly opened stream afterwards.
+	input, err := media.Open()
+	if err != nil {
+		return make([]byte, 80)
+	}
+	defer input.Close()
+	cmd := exec.Command("ffmpeg", "-v", "error", "-i", "pipe:0", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1")
+	cmd.Stdin = input
 	pcm, err := cmd.Output()
 	if err != nil || len(pcm) < 2 {
 		return make([]byte, 80)
