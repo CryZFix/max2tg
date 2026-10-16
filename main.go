@@ -768,17 +768,35 @@ func main() {
 	client.OnDisconnected(func(reason string) {
 		src.Logf("Disconnected: %s", reason)
 		if cfg.TGDebugUserID != 0 {
-			telegramSender.SendDebugMessage("Disconnected: "+reason, cfg.TGDebugUserID)
+			if err := telegramSender.SendDebugMessage("Disconnected: "+reason, cfg.TGDebugUserID); err != nil {
+				src.Logf("Failed to send disconnect debug message: %v", err)
+			}
 		}
 	})
 
 	client.OnAfterReconnect(func() {
 		src.Logf("Reconnected!")
 		if cfg.TGDebugUserID != 0 {
-			telegramSender.SendDebugMessage("Reconnected!", cfg.TGDebugUserID)
+			if err := telegramSender.SendDebugMessage("Reconnected!", cfg.TGDebugUserID); err != nil {
+				src.Logf("Failed to send reconnect debug message: %v", err)
+			}
 		}
 		for _, chatID := range telegramSender.GetAllMaxChatIDs() {
 			SyncChatHistory(client, db, telegramSender, userNames, channelNames, cfg, chatID)
+		}
+	})
+
+	client.OnAuthenticationFailure(func(err error) {
+		src.Logf("MAX authorization requires attention: %v", err)
+		if cfg.TGDebugUserID == 0 {
+			return
+		}
+		message := "MAX authorization failed. Update MAX_TOKEN and restart the service."
+		if authErr, ok := err.(*src.AuthenticationError); ok && authErr.Code != "" {
+			message = fmt.Sprintf("MAX authorization failed (%s). Update MAX_TOKEN and restart the service.", authErr.Code)
+		}
+		if sendErr := telegramSender.SendDebugMessage(message, cfg.TGDebugUserID); sendErr != nil {
+			src.Logf("Failed to send authorization debug message: %v", sendErr)
 		}
 	})
 

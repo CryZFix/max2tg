@@ -24,6 +24,8 @@ type ClientHandler interface {
 	GetDisconnectedHandlers() []func(string)
 	GetBeforeReconnectHandlers() []func(string)
 	GetAfterReconnectHandlers() []func()
+	ReportAuthenticationFailure(error)
+	ResetAuthenticationFailure()
 	SetMe(Me)
 	SetChats([]Chat)
 	SetConnectionTime(time.Time)
@@ -189,20 +191,57 @@ func (c *Connection) Authenticate(chatsCount int) (WebSocketPayload, error) {
 	cmdFloat, _ := response["cmd"].(float64)
 	opcode := int(opcodeFloat)
 	cmd := int(cmdFloat)
-	if opcode != int(AUTH) || cmd != 1 {
+	if opcode != int(AUTH) {
+		return nil, NewInvalidResponseError("authentication failed: invalid response")
+	}
+	if cmd == 3 {
+		err := authenticationErrorFromPayload(response["payload"])
+		if c.client != nil {
+			c.client.ReportAuthenticationFailure(err)
+		}
+		return nil, err
+	}
+	if cmd != 1 {
 		return nil, NewInvalidResponseError("authentication failed: invalid response")
 	}
 
 	payload, ok := response["payload"].(map[string]interface{})
 	if !ok {
-		return nil, NewInvalidTokenError("authentication failed: invalid response payload")
+		err := NewInvalidTokenError("invalid response payload")
+		if c.client != nil {
+			c.client.ReportAuthenticationFailure(err)
+		}
+		return nil, err
 	}
 
 	if _, hasProfile := payload["profile"]; !hasProfile {
-		return nil, NewInvalidTokenError("authentication failed: no profile data")
+		err := NewInvalidTokenError("no profile data")
+		if c.client != nil {
+			c.client.ReportAuthenticationFailure(err)
+		}
+		return nil, err
+	}
+	if c.client != nil {
+		c.client.ResetAuthenticationFailure()
 	}
 
 	return response, nil
+}
+
+func authenticationErrorFromPayload(raw interface{}) error {
+	payload, _ := raw.(map[string]interface{})
+	code := stringValue(payload, "error")
+	message := stringValue(payload, "localizedMessage")
+	if message == "" {
+		message = stringValue(payload, "message")
+	}
+	if message == "" {
+		message = stringValue(payload, "title")
+	}
+	if message == "" {
+		message = "MAX rejected authentication"
+	}
+	return NewAuthenticationError(code, message)
 }
 
 func (c *Connection) startPing(stopCh <-chan struct{}) {
@@ -318,7 +357,7 @@ func (c *Connection) receiveMessages(stopCh <-chan struct{}) {
 
 func (c *Connection) isResponse(payload WebSocketPayload) bool {
 	cmd, ok := parseInt(payload["cmd"])
-	return ok && cmd == 1
+	return ok && (cmd == 1 || cmd == 3)
 }
 
 func (c *Connection) send(payload WebSocketPayload) error {

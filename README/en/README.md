@@ -103,7 +103,7 @@ TG_TOKEN=your_telegram_bot_token
 TG_DEBUG_USER_ID=your_telegram_user_id
 ```
 
-`TG_DEBUG_USER_ID` is optional for debug notifications. If set, the bot will send you personal messages on disconnect and reconnect. This user is also the only one allowed to run `/maxdelete`. You can find your ID via [@userinfobot](https://t.me/userinfobot).
+`TG_DEBUG_USER_ID` is optional for debug notifications. If set, the bot will send you personal messages on disconnect, reconnect, and when MAX rejects an expired or invalid session token (`login.token`). The token notification is sent once per failure episode and resumes after a successful MAX authorization. Open a private chat with the bot and send `/start` first, otherwise Telegram rejects personal messages. This user is also the only one allowed to run `/maxdelete`. You can find your ID via [@userinfobot](https://t.me/userinfobot).
 
 ### Native Telegram voice messages
 

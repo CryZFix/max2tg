@@ -1096,8 +1096,20 @@ func (s *TelegramSender) SendDebugMessage(text string, userID int64) error {
 		return err
 	}
 	defer resp.Body.Close()
-
-	_ = resp
+	responseBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("Telegram debug message returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	var result struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return fmt.Errorf("decode Telegram debug response: %w", err)
+	}
+	if !result.OK {
+		return fmt.Errorf("Telegram debug message rejected: %s", result.Description)
+	}
 	return nil
 }
 

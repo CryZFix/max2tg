@@ -20,6 +20,8 @@ type Client struct {
 	beforeReconnectHandlers []func(string)
 	afterReconnectHandlers  []func()
 	disconnectedHandlers    []func(string)
+	authFailureHandlers     []func(error)
+	authFailureReported     bool
 	startHandlers           []func()
 	stopHandlers            []func()
 	connectedHandlers       []func()
@@ -49,6 +51,7 @@ func NewClient(config *Config) *Client {
 		beforeReconnectHandlers: []func(string){},
 		afterReconnectHandlers:  []func(){},
 		disconnectedHandlers:    []func(string){},
+		authFailureHandlers:     []func(error){},
 		startHandlers:           []func(){},
 		stopHandlers:            []func(){},
 		connectedHandlers:       []func(){},
@@ -94,6 +97,34 @@ func (c *Client) OnDisconnected(handler func(string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.disconnectedHandlers = append(c.disconnectedHandlers, handler)
+}
+
+// OnAuthenticationFailure registers a handler called once per uninterrupted
+// authentication failure episode. A successful MAX authentication resets it.
+func (c *Client) OnAuthenticationFailure(handler func(error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authFailureHandlers = append(c.authFailureHandlers, handler)
+}
+
+func (c *Client) ReportAuthenticationFailure(err error) {
+	c.mu.Lock()
+	if c.authFailureReported {
+		c.mu.Unlock()
+		return
+	}
+	c.authFailureReported = true
+	handlers := append([]func(error){}, c.authFailureHandlers...)
+	c.mu.Unlock()
+	for _, handler := range handlers {
+		handler(err)
+	}
+}
+
+func (c *Client) ResetAuthenticationFailure() {
+	c.mu.Lock()
+	c.authFailureReported = false
+	c.mu.Unlock()
 }
 
 func (c *Client) OnStart(handler func()) {
