@@ -1,8 +1,11 @@
 package src
 
 import (
+	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -16,7 +19,54 @@ const (
 	pingInterval              = 30 * time.Second
 	websocketHandshakeTimeout = 10 * time.Second
 	websocketWriteTimeout     = 10 * time.Second
+	websocketIPDialTimeout    = 3 * time.Second
 )
+
+// dialWebSocketHost resolves the WebSocket hostname and tries every returned
+// address. A single unreachable CDN address must not consume the whole
+// WebSocket handshake timeout and prevent trying the next address.
+//
+// The URL passed to gorilla/websocket is unchanged, so TLS still uses the
+// hostname as SNI and validates the server certificate against that hostname.
+func dialWebSocketHost(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("invalid WebSocket address %q: %w", address, err)
+	}
+
+	dialer := &net.Dialer{}
+	if net.ParseIP(host) != nil {
+		return dialer.DialContext(ctx, network, address)
+	}
+
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve WebSocket host %s: %w", host, err)
+	}
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("no IP addresses returned for WebSocket host %s", host)
+	}
+
+	var lastErr error
+	for _, resolved := range addresses {
+		ipAddress := net.JoinHostPort(resolved.IP.String(), port)
+		attemptCtx, cancel := context.WithTimeout(ctx, websocketIPDialTimeout)
+		conn, err := dialer.DialContext(attemptCtx, network, ipAddress)
+		cancel()
+		if err == nil {
+			Logf("Connected to WebSocket host %s via %s", host, resolved.IP.String())
+			return conn, nil
+		}
+
+		lastErr = err
+		Logf("Failed to connect to WebSocket host %s via %s: %v", host, resolved.IP.String(), err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+
+	return nil, fmt.Errorf("failed to connect to all resolved IPs for WebSocket host %s: %w", host, lastErr)
+}
 
 type ClientHandler interface {
 	GetFromWebSocketHandlers() []func(string)
@@ -97,7 +147,8 @@ func (c *Connection) Connect() error {
 	}
 
 	dialer := websocket.Dialer{
-		HandshakeTimeout: websocketHandshakeTimeout,
+		HandshakeTimeout:  websocketHandshakeTimeout,
+		EnableCompression: true,
 	}
 
 	maxProxy := GetMaxProxy(c.config)
@@ -108,6 +159,8 @@ func (c *Connection) Connect() error {
 		}
 		Logf("Connecting to WebSocket via SOCKS5 proxy %s:%d", maxProxy.Host, maxProxy.Port)
 		dialer.NetDial = socks5Dialer.Dial
+	} else {
+		dialer.NetDialContext = dialWebSocketHost
 	}
 
 	conn, _, err := dialer.Dial(WEBSOCKET_URL, headers)
@@ -151,10 +204,8 @@ func (c *Connection) sendInit() error {
 		return err
 	}
 
-	opcodeFloat, _ := response["opcode"].(float64)
-	cmdFloat, _ := response["cmd"].(float64)
-	opcode := int(opcodeFloat)
-	cmd := int(cmdFloat)
+	opcode, _ := parseInt(response["opcode"])
+	cmd, _ := parseInt(response["cmd"])
 	if opcode != int(INIT) || cmd != 1 {
 		return NewInvalidResponseError("invalid initialization response")
 	}
@@ -187,10 +238,8 @@ func (c *Connection) Authenticate(chatsCount int) (WebSocketPayload, error) {
 		return nil, err
 	}
 
-	opcodeFloat, _ := response["opcode"].(float64)
-	cmdFloat, _ := response["cmd"].(float64)
-	opcode := int(opcodeFloat)
-	cmd := int(cmdFloat)
+	opcode, _ := parseInt(response["opcode"])
+	cmd, _ := parseInt(response["cmd"])
 	if opcode != int(AUTH) {
 		return nil, NewInvalidResponseError("authentication failed: invalid response")
 	}
@@ -214,7 +263,13 @@ func (c *Connection) Authenticate(chatsCount int) (WebSocketPayload, error) {
 		return nil, err
 	}
 
-	if _, hasProfile := payload["profile"]; !hasProfile {
+	_, hasProfile := payload["profile"]
+	if _, hasDirectContact := payload["contact"].(map[string]interface{}); hasDirectContact {
+		hasProfile = true
+	}
+	// The binary web API returns the authenticated person's display profile
+	// directly, while the legacy JSON API nests it under "profile".
+	if !hasProfile && stringValue(payload, "type") != "ONEME" {
 		err := NewInvalidTokenError("no profile data")
 		if c.client != nil {
 			c.client.ReportAuthenticationFailure(err)
@@ -305,7 +360,7 @@ func (c *Connection) receiveMessages(stopCh <-chan struct{}) {
 	}()
 
 	for {
-		_, message, err := c.conn.ReadMessage()
+		messageType, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if c.connected {
 				Logf("WebSocket read error: %v", err)
@@ -315,17 +370,26 @@ func (c *Connection) receiveMessages(stopCh <-chan struct{}) {
 			return
 		}
 
-		Logf("↓ %s", string(message))
-
-		var payload WebSocketPayload
-		if err := json.Unmarshal(message, &payload); err != nil {
-			Logf("Failed to parse message: %v", err)
+		if messageType != websocket.BinaryMessage {
+			Logf("Ignoring non-binary WebSocket message (type %d)", messageType)
 			continue
 		}
 
+		payload, err := decodeWebSocketFrame(message)
+		if err != nil {
+			if isShortMessageNotification(message) {
+				Logf("Undecoded MAX message notification (%s body_hex=%x): %v", binaryFrameSummary(message), message[mobileFrameHeader:], err)
+			} else {
+				Logf("Failed to parse binary WebSocket frame (%s): %v", binaryFrameSummary(message), err)
+			}
+			continue
+		}
+		loggedPayload := formatWebSocketLog(payload)
+		Logf("↓ %s", loggedPayload)
+
 		if c.client != nil {
 			for _, handler := range c.client.GetFromWebSocketHandlers() {
-				handler(string(message))
+				handler(formatWebSocketPayload(payload))
 			}
 		}
 
@@ -355,6 +419,12 @@ func (c *Connection) receiveMessages(stopCh <-chan struct{}) {
 	}
 }
 
+func isShortMessageNotification(frame []byte) bool {
+	return len(frame) >= mobileFrameHeader &&
+		binary.BigEndian.Uint16(frame[4:6]) == uint16(ON_MESSAGE+1) &&
+		len(frame)-mobileFrameHeader <= 256
+}
+
 func (c *Connection) isResponse(payload WebSocketPayload) bool {
 	cmd, ok := parseInt(payload["cmd"])
 	return ok && (cmd == 1 || cmd == 3)
@@ -365,27 +435,133 @@ func (c *Connection) send(payload WebSocketPayload) error {
 		return NewConnectionError("WebSocket not connected")
 	}
 
-	data, err := json.Marshal(payload)
+	data, err := buildWebSocketFrame(c.config, payload)
 	if err != nil {
 		return err
 	}
 
-	Logf("↑ %s", string(data))
+	loggedPayload := formatWebSocketLog(payload)
+	Logf("↑ %s", loggedPayload)
 
 	if c.client != nil {
 		for _, handler := range c.client.GetToWebSocketHandlers() {
-			handler(string(data))
+			handler(formatWebSocketPayload(payload))
 		}
 	}
 
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	c.conn.SetWriteDeadline(time.Now().Add(websocketWriteTimeout))
-	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+	if err := c.conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		return NewConnectionError("failed to send: " + err.Error())
 	}
 
 	return nil
+}
+
+func formatWebSocketPayload(payload WebSocketPayload) string {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "<unavailable>"
+	}
+	return string(encoded)
+}
+
+func formatWebSocketLog(payload WebSocketPayload) string {
+	redacted := make(map[string]interface{}, len(payload))
+	for key, value := range payload {
+		redacted[key] = redactMobileDebugValue(value, key)
+	}
+	encoded, err := json.Marshal(redacted)
+	if err != nil {
+		return "<unavailable>"
+	}
+	return string(encoded)
+}
+
+func binaryFrameSummary(frame []byte) string {
+	if len(frame) < mobileFrameHeader {
+		return fmt.Sprintf("bytes=%d", len(frame))
+	}
+	return fmt.Sprintf("cmd=%d seq=%d opcode=%d flags=%d body=%d",
+		frame[1], binary.BigEndian.Uint16(frame[2:4]), binary.BigEndian.Uint16(frame[4:6]), frame[6], len(frame)-mobileFrameHeader)
+}
+
+// buildWebSocketFrame encodes the protocol used by the current MAX web
+// application: a 10-byte command header followed by a MessagePack payload.
+// The payload is LZ4-compressed (flag 2), as in the browser client.
+func buildWebSocketFrame(config *Config, request WebSocketPayload) ([]byte, error) {
+	seq, ok := parseInt(request["seq"])
+	if !ok {
+		return nil, NewConnectionError("WebSocket request missing sequence number")
+	}
+	opcode, ok := parseInt(request["opcode"])
+	if !ok {
+		return nil, NewConnectionError("WebSocket request missing opcode")
+	}
+
+	var body interface{}
+	if opcode == int(INIT) {
+		if config == nil || config.UserAgent == nil || config.DeviceID == "" {
+			return nil, NewConnectionError("binary WebSocket INIT requires device_id and user_agent")
+		}
+		ua := config.UserAgent
+		body = webBinarySessionInit{
+			UserAgent: webBinaryUserAgent{
+				DeviceType: "WEB", PushDeviceType: "WEBPUSH", Locale: ua.Locale,
+				DeviceLocale: ua.DeviceLocale, OSVersion: ua.OSVersion, DeviceName: ua.DeviceName,
+				HeaderUserAgent: ua.UserAgent, IsPWA: false, AppVersion: ua.AppVersion,
+				Screen: ua.Screen, Timezone: ua.Timezone,
+			},
+			DeviceID: config.DeviceID,
+		}
+	} else {
+		var exists bool
+		body, exists = request["payload"]
+		if !exists {
+			body = map[string]interface{}{}
+		}
+	}
+
+	return buildMobileRequestFrame(uint16(seq), uint16(opcode), body, 2, nil)
+}
+
+// decodeWebSocketFrame converts a MAX binary WebSocket response into the
+// envelope used by the rest of the bridge.
+func decodeWebSocketFrame(frame []byte) (WebSocketPayload, error) {
+	if len(frame) < mobileFrameHeader {
+		return nil, fmt.Errorf("binary frame is too short: %d bytes", len(frame))
+	}
+	if frame[0] != 0x0a {
+		return nil, fmt.Errorf("invalid binary frame magic %#x", frame[0])
+	}
+
+	length := int(frame[7])<<16 | int(frame[8])<<8 | int(frame[9])
+	if len(frame) != mobileFrameHeader+length {
+		return nil, fmt.Errorf("invalid binary frame length: header=%d actual=%d", length, len(frame)-mobileFrameHeader)
+	}
+	opcode := int(binary.BigEndian.Uint16(frame[4:6]))
+	// The binary API acknowledges PING with an empty response body. It is a
+	// valid pong, not a malformed MessagePack packet.
+	if length == 0 && opcode == int(PING) {
+		return WebSocketPayload{
+			"cmd":     int(frame[1]),
+			"seq":     int(binary.BigEndian.Uint16(frame[2:4])),
+			"opcode":  opcode,
+			"payload": map[string]interface{}{},
+		}, nil
+	}
+
+	body, err := decodeMobilePayload(frame[mobileFrameHeader:], frame[6])
+	if err != nil {
+		return nil, err
+	}
+	return WebSocketPayload{
+		"cmd":     int(frame[1]),
+		"seq":     int(binary.BigEndian.Uint16(frame[2:4])),
+		"opcode":  opcode,
+		"payload": body,
+	}, nil
 }
 
 func (c *Connection) sendAndReceive(payload WebSocketPayload, timeout time.Duration) (WebSocketPayload, error) {

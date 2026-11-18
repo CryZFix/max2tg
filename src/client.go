@@ -298,13 +298,13 @@ func (c *Client) handleMessage(messageData map[string]interface{}) {
 		return
 	}
 
-	chatID, _ := payload["chatId"].(float64)
+	chatID := ParseID(payload["chatId"])
 	messagePayload, ok := payload["message"].(map[string]interface{})
 	if !ok {
 		return
 	}
 
-	msg := parseMessage(messagePayload, int(chatID))
+	msg := parseMessage(messagePayload, chatID)
 	if msg.CID != nil && c.consumeLocalCID(*msg.CID) {
 		Logf("Ignoring local MAX echo for cid %d", *msg.CID)
 		return
@@ -417,10 +417,8 @@ func (c *Client) GetContacts(contactIDs []int) ([]Contact, error) {
 	if err != nil {
 		return nil, err
 	}
-	opcodeFloat, _ := response["opcode"].(float64)
-	cmdFloat, _ := response["cmd"].(float64)
-	opcode := int(opcodeFloat)
-	cmd := int(cmdFloat)
+	opcode, _ := parseInt(response["opcode"])
+	cmd, _ := parseInt(response["cmd"])
 	if opcode != int(GET_CONTACTS) || cmd != 1 {
 		return nil, NewInvalidResponseError("invalid contacts response")
 	}
@@ -448,10 +446,8 @@ func (c *Client) GetMessages(chatID int, backward, forward int, fromTime *int64)
 	if err != nil {
 		return nil, err
 	}
-	opcodeFloat, _ := response["opcode"].(float64)
-	cmdFloat, _ := response["cmd"].(float64)
-	opcode := int(opcodeFloat)
-	cmd := int(cmdFloat)
+	opcode, _ := parseInt(response["opcode"])
+	cmd, _ := parseInt(response["cmd"])
 	if opcode != int(GET_MESSAGES) || cmd != 1 {
 		return nil, NewInvalidResponseError("invalid messages response")
 	}
@@ -555,10 +551,8 @@ func (c *Client) GetVideoLink(videoAttachment Attachment, message Message) (stri
 	if err != nil {
 		return "", err
 	}
-	opcodeFloat, _ := response["opcode"].(float64)
-	cmdFloat, _ := response["cmd"].(float64)
-	opcode := int(opcodeFloat)
-	cmd := int(cmdFloat)
+	opcode, _ := parseInt(response["opcode"])
+	cmd, _ := parseInt(response["cmd"])
 	if opcode != int(GET_VIDEO) || cmd != 1 {
 		return "", NewInvalidResponseError("invalid video link response")
 	}
@@ -584,10 +578,8 @@ func (c *Client) SendMessage(chatID int, text string, replyToMsgID *int) (int, e
 	if err != nil {
 		return 0, err
 	}
-	opcodeFloat, _ := response["opcode"].(float64)
-	cmdFloat, _ := response["cmd"].(float64)
-	opcode := int(opcodeFloat)
-	cmd := int(cmdFloat)
+	opcode, _ := parseInt(response["opcode"])
+	cmd, _ := parseInt(response["cmd"])
 	if opcode != int(SEND_MESSAGE) || cmd != 1 {
 		return 0, NewInvalidResponseError("invalid send message response")
 	}
@@ -597,7 +589,11 @@ func (c *Client) SendMessage(chatID int, text string, replyToMsgID *int) (int, e
 	}
 	msgData, ok := payload["message"].(map[string]interface{})
 	if !ok {
-		return 0, NewInvalidResponseError("no message in response")
+		// The binary WebSocket API acknowledges SEND_MESSAGE before it emits the
+		// asynchronous message event. The acknowledgement deliberately has no
+		// message object, but it still means that MAX accepted the send.
+		Logf("MAX accepted message for chat %d without a synchronous message ID", chatID)
+		return 0, nil
 	}
 	msgID := ParseID(msgData["id"])
 	if msgID == 0 {
@@ -615,10 +611,8 @@ func (c *Client) SetReaction(chatID int, messageID int64, emoji string) error {
 	if err != nil {
 		return err
 	}
-	opcodeFloat, _ := response["opcode"].(float64)
-	cmdFloat, _ := response["cmd"].(float64)
-	opcode := int(opcodeFloat)
-	cmd := int(cmdFloat)
+	opcode, _ := parseInt(response["opcode"])
+	cmd, _ := parseInt(response["cmd"])
 	if opcode != int(SET_REACTION) || cmd != 1 {
 		return NewInvalidResponseError("invalid set reaction response")
 	}
@@ -640,10 +634,8 @@ func (c *Client) GetFileLink(fileAttachment Attachment, message Message) (string
 	if err != nil {
 		return "", err
 	}
-	opcodeFloat, _ := response["opcode"].(float64)
-	cmdFloat, _ := response["cmd"].(float64)
-	opcode := int(opcodeFloat)
-	cmd := int(cmdFloat)
+	opcode, _ := parseInt(response["opcode"])
+	cmd, _ := parseInt(response["cmd"])
 	if opcode != int(GET_FILE) || cmd != 1 {
 		return "", NewInvalidResponseError("invalid file link response")
 	}
@@ -667,10 +659,8 @@ func (c *Client) GetChatInfo(chatIDs []int) ([]Chat, error) {
 	if err != nil {
 		return nil, err
 	}
-	opcodeFloat, _ := response["opcode"].(float64)
-	cmdFloat, _ := response["cmd"].(float64)
-	opcode := int(opcodeFloat)
-	cmd := int(cmdFloat)
+	opcode, _ := parseInt(response["opcode"])
+	cmd, _ := parseInt(response["cmd"])
 	if opcode != int(GET_CHATS) || cmd != 1 {
 		return nil, NewInvalidResponseError("invalid chats response")
 	}

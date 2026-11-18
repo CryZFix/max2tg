@@ -17,7 +17,7 @@ You can download a ready-made build for your OS from the releases.
 Or build the project manually:
 
 ```bash
-git clone https://github.com/mochensky/max2tg
+git clone https://github.com/cryzfix/max2tg
 cd max2tg
 go build -o max2tg .
 ./max2tg

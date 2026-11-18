@@ -97,11 +97,11 @@ func responsePayload(response WebSocketPayload, opcode Opcode) (map[string]inter
 	gotOpcode, _ := parseInt(response["opcode"])
 	cmd, _ := parseInt(response["cmd"])
 	if gotOpcode != int(opcode) || cmd != 1 {
-		return nil, NewInvalidResponseError("invalid media upload response")
+		return nil, NewInvalidResponseError(fmt.Sprintf("invalid response for opcode %d (got opcode %d, cmd %d)", opcode, gotOpcode, cmd))
 	}
 	payload, ok := response["payload"].(map[string]interface{})
 	if !ok {
-		return nil, NewInvalidResponseError("missing media upload payload")
+		return nil, NewInvalidResponseError(fmt.Sprintf("missing payload in response for opcode %d", opcode))
 	}
 	return payload, nil
 }

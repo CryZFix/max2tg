@@ -1454,10 +1454,14 @@ func (s *TelegramSender) forwardTelegramMessages(client *Client, db *Database, m
 		return
 	}
 
-	for _, message := range messages {
-		if err := db.AddTelegramMessageLink(int64(message.MessageID), int64(maxMsgID), route.MaxChatID); err != nil {
-			Logf("Failed to save Telegram message link %d: %v", message.MessageID, err)
+	if maxMsgID != 0 {
+		for _, message := range messages {
+			if err := db.AddTelegramMessageLink(int64(message.MessageID), int64(maxMsgID), route.MaxChatID); err != nil {
+				Logf("Failed to save Telegram message link %d: %v", message.MessageID, err)
+			}
 		}
+	} else {
+		Logf("MAX accepted Telegram message without an ID; reply, edit, delete and reaction mapping will wait for its asynchronous event")
 	}
 	Logf("Message forwarded to MAX chat %d, MAX msg ID: %d (TG msg ID: %d)", route.MaxChatID, maxMsgID, msg.MessageID)
 }

@@ -99,6 +99,28 @@ const mobileHelloTemplateCanonical = "0a000001000602000130f35a84ad6d745f696e7374
 
 var mobileHelloTemplate = mustHelloTemplate()
 
+// MAX represents several integer identifiers with MessagePack extension type
+// 1. Its payload is an ordinary MessagePack integer (for example d2 + int32).
+// Registering the extension lets the generic map decoder preserve these IDs.
+type maxInteger int64
+
+func (v maxInteger) MarshalMsgpack() ([]byte, error) {
+	return msgpack.Marshal(int64(v))
+}
+
+func (v *maxInteger) UnmarshalMsgpack(data []byte) error {
+	var value int64
+	if err := msgpack.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*v = maxInteger(value)
+	return nil
+}
+
+func init() {
+	msgpack.RegisterExt(1, (*maxInteger)(nil))
+}
+
 func mustHelloTemplate() []byte {
 	b, err := hex.DecodeString(mobileHelloTemplateCanonical)
 	if err != nil {
@@ -453,11 +475,16 @@ func isSafeMobileDebugKey(key string) bool {
 
 func decodeMobilePayload(body []byte, flags byte) (map[string]interface{}, error) {
 	working := body
+	var lastDecompressErr error
 	if flags != 0 {
 		var decoded []byte
 		for size := len(body)*3 + 1024; size <= len(body)*512+1024; size *= 2 {
 			candidate := make([]byte, size)
-			if n, err := lz4.UncompressBlock(body, candidate); err == nil && n > 0 {
+			n, err := lz4.UncompressBlock(body, candidate)
+			if err != nil {
+				lastDecompressErr = err
+			}
+			if err == nil && n > 0 {
 				decoded = candidate[:n]
 				break
 			}
@@ -466,7 +493,13 @@ func decodeMobilePayload(body []byte, flags byte) (map[string]interface{}, error
 			working = decoded
 		}
 	}
-	for offset := 0; offset < len(working) && offset < 12; offset++ {
+	if flags != 0 && len(working) == len(body) && lastDecompressErr != nil {
+		return nil, fmt.Errorf("could not decompress LZ4 payload: %w", lastDecompressErr)
+	}
+	// Some current web responses include a protocol-specific prefix before the
+	// MessagePack map. Scan enough of the prefix to find the actual payload.
+	// Restricting this to the first 12 bytes misses large AUTH responses.
+	for offset := 0; offset < len(working) && offset < 64*1024; offset++ {
 		h := working[offset]
 		if !((h >= 0x80 && h <= 0x8f) || h == 0xde || h == 0xdf) {
 			continue

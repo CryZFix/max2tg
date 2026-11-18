@@ -32,7 +32,7 @@
 
 ### Вариант 1: Скачать готовую сборку (рекомендуется)
 
-Перейдите на [страницу релизов](https://github.com/mochensky/max2tg/releases/latest) и скачайте бинарник для вашей ОС:
+Перейдите на [страницу релизов](https://github.com/cryzfix/max2tg/releases/latest) и скачайте бинарник для вашей ОС:
 
 - `max2tg-linux-amd64` — Linux (x86-64)
 - `max2tg-linux-arm64` — Linux (ARM64)
@@ -41,7 +41,7 @@
 ### Вариант 2: Собрать из исходников
 
 ```bash
-git clone https://github.com/mochensky/max2tg
+git clone https://github.com/cryzfix/max2tg
 cd max2tg
 go build -o max2tg .
 ```
@@ -103,7 +103,7 @@ TG_TOKEN=токен_вашего_telegram_бота
 TG_DEBUG_USER_ID=ваш_telegram_user_id
 ```
 
-`TG_DEBUG_USER_ID` — необязательное поле для debug-уведомлений. Если указан, бот будет присылать вам личные сообщения при отключении, переподключении и когда MAX отклоняет истёкший или недействительный токен сессии (`login.token`). Уведомление о токене отправляется один раз на эпизод сбоя; после успешной авторизации MAX его можно получить снова. Сначала откройте личный чат с ботом и отправьте `/start`, иначе Telegram отклонит личное сообщение. Этот же пользователь — единственный, кто может выполнить команду `/maxdelete`. Узнать свой ID можно через [@userinfobot](https://t.me/userinfobot).
+`TG_DEBUG_USER_ID` — необязательное поле для debug-уведомлений. Если указан, бот будет присылать вам личные сообщения при отключении, переподключении, когда MAX отклоняет истёкший или недействительный токен сессии (`login.token`), а также при недоступности MAX во время старта. Уведомление о неудачном старте отправляется один раз на эпизод сбоя; после восстановления MAX бот пришлёт сообщение о восстановлении. Уведомление о токене также отправляется один раз на эпизод сбоя; после успешной авторизации MAX его можно получить снова. Сначала откройте личный чат с ботом и отправьте `/start`, иначе Telegram отклонит личное сообщение. Этот же пользователь — единственный, кто может выполнить команду `/maxdelete`. Узнать свой ID можно через [@userinfobot](https://t.me/userinfobot).
 
 ### Нативные голосовые из Telegram
 
@@ -204,15 +204,19 @@ cd /opt/max2tg
 ```ini
 [Unit]
 Description=max2tg
-After=network.target
+Wants=network-online.target
+After=network-online.target
+# Не прекращать попытки при длительной недоступности DNS/сети.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=имя_вашего_linux_пользователя
 WorkingDirectory=/opt/max2tg
 ExecStart=/opt/max2tg/max2tg-linux-amd64
-Restart=on-failure
-RestartSec=10
+# Дублирует защиту в приложении: перезапускает даже при неожиданном выходе с кодом 0.
+Restart=always
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target

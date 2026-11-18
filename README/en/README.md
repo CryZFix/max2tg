@@ -32,7 +32,7 @@ A bridge between [MAX](https://max.ru) messenger and [Telegram](https://telegram
 
 ### Option 1: Download a pre-built binary (recommended)
 
-Go to the [releases page](https://github.com/mochensky/max2tg/releases/latest) and download the binary for your OS:
+Go to the [releases page](https://github.com/cryzfix/max2tg/releases/latest) and download the binary for your OS:
 
 - `max2tg-linux-amd64` — Linux (x86-64)
 - `max2tg-linux-arm64` — Linux (ARM64)
@@ -41,7 +41,7 @@ Go to the [releases page](https://github.com/mochensky/max2tg/releases/latest) a
 ### Option 2: Build from source
 
 ```bash
-git clone https://github.com/mochensky/max2tg
+git clone https://github.com/cryzfix/max2tg
 cd max2tg
 go build -o max2tg .
 ```
@@ -103,7 +103,7 @@ TG_TOKEN=your_telegram_bot_token
 TG_DEBUG_USER_ID=your_telegram_user_id
 ```
 
-`TG_DEBUG_USER_ID` is optional for debug notifications. If set, the bot will send you personal messages on disconnect, reconnect, and when MAX rejects an expired or invalid session token (`login.token`). The token notification is sent once per failure episode and resumes after a successful MAX authorization. Open a private chat with the bot and send `/start` first, otherwise Telegram rejects personal messages. This user is also the only one allowed to run `/maxdelete`. You can find your ID via [@userinfobot](https://t.me/userinfobot).
+`TG_DEBUG_USER_ID` is optional for debug notifications. If set, the bot will send you personal messages on disconnect, reconnect, when MAX rejects an expired or invalid session token (`login.token`), and if MAX is unavailable at startup. Startup-failure notifications are sent once per outage; after MAX becomes available again, the bot sends a recovery notification. The token notification is also sent once per failure episode and resumes after a successful MAX authorization. Open a private chat with the bot and send `/start` first, otherwise Telegram rejects personal messages. This user is also the only one allowed to run `/maxdelete`. You can find your ID via [@userinfobot](https://t.me/userinfobot).
 
 ### Native Telegram voice messages
 
@@ -204,15 +204,19 @@ Create the file `/etc/systemd/system/max2tg.service`:
 ```ini
 [Unit]
 Description=max2tg
-After=network.target
+Wants=network-online.target
+After=network-online.target
+# Keep retrying during a prolonged DNS/network outage.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=your_linux_username
 WorkingDirectory=/opt/max2tg
 ExecStart=/opt/max2tg/max2tg-linux-amd64
-Restart=on-failure
-RestartSec=10
+# Defense in depth: also restart after an unexpected exit with status 0.
+Restart=always
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target

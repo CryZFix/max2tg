@@ -29,6 +29,12 @@ func ParseID(idValue interface{}) int {
 	if idInt64, ok := idValue.(int64); ok {
 		return int(idInt64)
 	}
+	if idMax, ok := idValue.(maxInteger); ok {
+		return int(idMax)
+	}
+	if idMax, ok := idValue.(*maxInteger); ok && idMax != nil {
+		return int(*idMax)
+	}
 
 	return 0
 }
@@ -54,6 +60,12 @@ func parseInt64(value interface{}) (int64, bool) {
 
 	if i, ok := value.(int); ok {
 		return int64(i), true
+	}
+	if i, ok := value.(maxInteger); ok {
+		return int64(i), true
+	}
+	if i, ok := value.(*maxInteger); ok && i != nil {
+		return int64(*i), true
 	}
 
 	return 0, false
@@ -344,15 +356,15 @@ func parseForwardedMessage(linkData map[string]interface{}) *ForwardedMessage {
 	formatted := parseHTMLText(forwarded.Text, elements)
 	forwarded.FormattedHTMLText = &formatted
 
-	if timeVal, ok := messageData["time"].(float64); ok {
-		t := int64(timeVal)
+	if timeVal, ok := parseInt64(messageData["time"]); ok {
+		t := timeVal
 		forwarded.Time = &t
 	}
 	if msgType, ok := messageData["type"].(string); ok {
 		forwarded.Type = &msgType
 	}
-	if timeVal, ok := messageData["time"].(float64); ok {
-		t := int64(timeVal)
+	if timeVal, ok := parseInt64(messageData["time"]); ok {
+		t := timeVal
 		forwarded.Time = &t
 	}
 	if msgType, ok := messageData["type"].(string); ok {
@@ -453,12 +465,12 @@ func parseMessage(messageData map[string]interface{}, chatID int) Message {
 	if text, ok := messageData["text"].(string); ok {
 		msg.Text = text
 	}
-	if timeVal, ok := messageData["time"].(float64); ok {
-		t := int64(timeVal)
+	if timeVal, ok := parseInt64(messageData["time"]); ok {
+		t := timeVal
 		msg.Time = &t
 	}
-	if updateTime, ok := messageData["updateTime"].(float64); ok {
-		ut := int64(updateTime)
+	if updateTime, ok := parseInt64(messageData["updateTime"]); ok {
+		ut := updateTime
 		msg.UpdateTime = &ut
 	}
 	if msgType, ok := messageData["type"].(string); ok {
@@ -521,7 +533,23 @@ func parseMessage(messageData map[string]interface{}, chatID int) Message {
 func parseProfile(payload map[string]interface{}) Me {
 	me := Me{}
 
-	if profileData, ok := payload["profile"].(map[string]interface{}); ok {
+	profileData, hasProfile := payload["profile"].(map[string]interface{})
+	if !hasProfile {
+		if _, hasDirectContact := payload["contact"].(map[string]interface{}); hasDirectContact {
+			// Current binary AUTH responses expose contact/profileOptions at the
+			// top level instead of nesting them in "profile".
+			profileData = payload
+			hasProfile = true
+		}
+	}
+	if !hasProfile && stringValue(payload, "type") == "ONEME" {
+		// Binary WebSocket AUTH responses expose the short profile directly.
+		me.FirstName = stringValue(payload, "firstName")
+		me.LastName = stringValue(payload, "lastName")
+		me.Name = stringValue(payload, "name")
+		me.NameType = stringValue(payload, "type")
+	}
+	if hasProfile {
 		if contact, ok := profileData["contact"].(map[string]interface{}); ok {
 			me.ID = ParseID(contact["id"])
 			me.Phone = ParseID(contact["phone"])
@@ -572,8 +600,8 @@ func parseProfile(payload map[string]interface{}) Me {
 	if chatMarker, ok := payload["chatMarker"].(float64); ok {
 		me.ChatMarker = int(chatMarker)
 	}
-	if timeVal, ok := payload["time"].(float64); ok {
-		t := int64(timeVal)
+	if timeVal, ok := parseInt64(payload["time"]); ok {
+		t := timeVal
 		me.Time = &t
 	}
 	if presence, ok := payload["presence"].(map[string]interface{}); ok {
@@ -607,16 +635,16 @@ func parseChat(chatData map[string]interface{}) Chat {
 			chat.Participants[key] = val
 		}
 	}
-	if created, ok := chatData["created"].(float64); ok {
-		c := int64(created)
+	if created, ok := parseInt64(chatData["created"]); ok {
+		c := created
 		chat.Created = &c
 	}
-	if modified, ok := chatData["modified"].(float64); ok {
-		m := int64(modified)
+	if modified, ok := parseInt64(chatData["modified"]); ok {
+		m := modified
 		chat.Modified = &m
 	}
-	if joinTime, ok := chatData["joinTime"].(float64); ok {
-		j := int64(joinTime)
+	if joinTime, ok := parseInt64(chatData["joinTime"]); ok {
+		j := joinTime
 		chat.JoinTime = &j
 	}
 	if ownerVal := chatData["owner"]; ownerVal != nil {

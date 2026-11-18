@@ -21,7 +21,8 @@ func CheckForUpdates(ctx context.Context) (latestVersion string, updateAvailable
 		Timeout: 5 * time.Second,
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/repos/mochensky/max2tg/releases/latest", nil)
+	releaseAPIURL := strings.Replace(RepositoryURL, "https://github.com/", "https://api.github.com/repos/", 1) + "/releases/latest"
+	req, err := http.NewRequestWithContext(ctx, "GET", releaseAPIURL, nil)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to create request: %w", err)
 	}

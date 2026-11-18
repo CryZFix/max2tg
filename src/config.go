@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	AppName    = "max2tg"
-	AppVersion = "1.2.0"
+	AppName       = "max2tg"
+	AppVersion    = "1.4.3"
+	RepositoryURL = "https://github.com/cryzfix/max2tg"
 
 	DefaultEnvPath      = "data/.env"
 	DefaultDBPath       = "data/database.db"
@@ -282,7 +283,7 @@ func CreateDefaultConfig(path string) error {
 	}
 
 	yamlContent := fmt.Sprintf(`# %s %s
-# GitHub: https://github.com/mochensky/max2tg
+# GitHub: https://github.com/cryzfix/max2tg
 
 # EN: paths to data
 # RU: пути к данным

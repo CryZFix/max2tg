@@ -1,7 +1,6 @@
 package src
 
 import (
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -63,11 +62,13 @@ func (rb *RequestBuilder) Init() WebSocketPayload {
 	payload := map[string]interface{}{
 		"userAgent": map[string]interface{}{
 			"deviceType":      "WEB",
+			"pushDeviceType":  "WEBPUSH",
 			"locale":          ua.Locale,
 			"deviceLocale":    ua.DeviceLocale,
 			"osVersion":       ua.OSVersion,
 			"deviceName":      ua.DeviceName,
 			"headerUserAgent": ua.UserAgent,
+			"isPwa":           false,
 			"appVersion":      ua.AppVersion,
 			"screen":          ua.Screen,
 			"timezone":        ua.Timezone,
@@ -118,18 +119,18 @@ func (rb *RequestBuilder) GetChatMessages(chatID int, fromTime int64, forward, b
 func (rb *RequestBuilder) GetMessage(chatID int, messageID int64) WebSocketPayload {
 	payload := map[string]interface{}{
 		"chatId":     chatID,
-		"messageIds": []string{strconv.FormatInt(messageID, 10)},
+		"messageIds": []int64{messageID},
 	}
 	return rb.buildBaseRequest(GET_MESSAGE, payload)
 }
 
 func (rb *RequestBuilder) EditMessage(chatID int, messageID int64, text string, attachments []interface{}) WebSocketPayload {
 	payload := map[string]interface{}{
-		"chatId":      chatID,
-		"messageId":   strconv.FormatInt(messageID, 10),
-		"text":        text,
-		"elements":    []interface{}{},
-		"attachments": attachments,
+		"chatId":    chatID,
+		"messageId": messageID,
+		"text":      text,
+		"elements":  []interface{}{},
+		"attaches":  attachments,
 	}
 	return rb.buildBaseRequest(EDIT_MESSAGE, payload)
 }
@@ -137,7 +138,7 @@ func (rb *RequestBuilder) EditMessage(chatID int, messageID int64, text string, 
 func (rb *RequestBuilder) DeleteMessage(chatID int, messageID int64) WebSocketPayload {
 	payload := map[string]interface{}{
 		"chatId":     chatID,
-		"messageIds": []string{strconv.FormatInt(messageID, 10)},
+		"messageIds": []int64{messageID},
 		"forMe":      false,
 	}
 	return rb.buildBaseRequest(DELETE_MESSAGE, payload)
@@ -191,7 +192,7 @@ func (rb *RequestBuilder) SendMessageWithAttachments(chatID int, text string, at
 	if replyToMsgID != nil {
 		msgPayload["link"] = map[string]interface{}{
 			"type":      "REPLY",
-			"messageId": strconv.FormatInt(int64(*replyToMsgID), 10),
+			"messageId": int64(*replyToMsgID),
 		}
 	}
 	payload := map[string]interface{}{
@@ -205,7 +206,7 @@ func (rb *RequestBuilder) SendMessageWithAttachments(chatID int, text string, at
 func (rb *RequestBuilder) SetReaction(chatID int, messageID int64, emoji string) WebSocketPayload {
 	payload := map[string]interface{}{
 		"chatId":    chatID,
-		"messageId": strconv.FormatInt(messageID, 10),
+		"messageId": messageID,
 		"reaction": map[string]interface{}{
 			"reactionType": "EMOJI",
 			"id":           emoji,

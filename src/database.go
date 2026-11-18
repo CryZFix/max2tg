@@ -49,6 +49,11 @@ func createTables(db *sql.DB) error {
 			max_message_id INTEGER NOT NULL,
 			max_chat_id INTEGER NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS service_state (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		return err
@@ -117,6 +122,30 @@ func (d *Database) GetMessageByMaxID(maxMessageID int64) (map[string]interface{}
 		"edited_at":      editedAt,
 		"max_chat_id":    chatID,
 	}, nil
+}
+
+// GetTelegramMessageForMaxID returns the Telegram message linked to a MAX
+// message. Incoming MAX messages live in messages, while messages sent in the
+// reverse direction are recorded in telegram_message_links.
+func (d *Database) GetTelegramMessageForMaxID(maxMessageID int64) (tgMessageID int64, maxChatID int, found bool, err error) {
+	if record, err := d.GetMessageByMaxID(maxMessageID); err != nil || record != nil {
+		if err != nil || record == nil {
+			return 0, 0, false, err
+		}
+		return record["tg_message_id"].(int64), int(record["max_chat_id"].(int64)), true, nil
+	}
+
+	err = d.db.QueryRow(
+		`SELECT tg_message_id, max_chat_id FROM telegram_message_links WHERE max_message_id = ?`,
+		maxMessageID,
+	).Scan(&tgMessageID, &maxChatID)
+	if err == sql.ErrNoRows {
+		return 0, 0, false, nil
+	}
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return tgMessageID, maxChatID, true, nil
 }
 
 func (d *Database) GetMessageByTgID(tgMessageID int64) (map[string]interface{}, error) {
@@ -224,6 +253,30 @@ func (d *Database) GetAllCachedChatIDs() ([]int, error) {
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+// GetServiceState returns a value persisted across process restarts. It is
+// used for operational notifications, rather than message synchronization.
+func (d *Database) GetServiceState(key string) (string, bool, error) {
+	var value string
+	err := d.db.QueryRow(`SELECT value FROM service_state WHERE key = ?`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
+func (d *Database) SetServiceState(key, value string) error {
+	_, err := d.db.Exec(`INSERT OR REPLACE INTO service_state (key, value) VALUES (?, ?)`, key, value)
+	return err
+}
+
+func (d *Database) DeleteServiceState(key string) error {
+	_, err := d.db.Exec(`DELETE FROM service_state WHERE key = ?`, key)
+	return err
 }
 
 func (d *Database) Close() error {

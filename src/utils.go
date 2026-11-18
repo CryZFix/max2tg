@@ -28,6 +28,15 @@ func parseInt(v interface{}) (int, bool) {
 		return int(t), true
 	case int:
 		return t, true
+	case int64:
+		return int(t), true
+	case maxInteger:
+		return int(t), true
+	case *maxInteger:
+		if t != nil {
+			return int(*t), true
+		}
+		return 0, false
 	default:
 		return 0, false
 	}

@@ -1,7 +1,7 @@
 package src
 
 const (
-	WEBSOCKET_URL = "wss://ws-api.oneme.ru/websocket"
+	WEBSOCKET_URL = "wss://api.oneme.ru/websocket"
 )
 
 type WebSocketPayload map[string]interface{}

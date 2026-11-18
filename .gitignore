@@ -32,3 +32,6 @@ go.work.sum
 # Build and data directories - полностью игнорируем
 build/
 data/
+
+# Local default Go build output
+/max2tg

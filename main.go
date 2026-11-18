@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mochensky/max2tg/src"
+	"github.com/cryzfix/max2tg/src"
 )
 
 func safeInt64(m map[string]interface{}, key string) int64 {
@@ -172,6 +172,51 @@ func HandleControlMessage(message src.Message, userNames *src.SafeMap, loc *time
 }
 
 var processingMessages sync.Map
+
+const maxStartupFailureStateKey = "max_startup_failure"
+
+func notifyMaxStartupFailure(db *src.Database, sender *src.TelegramSender, cfg *src.Config, startErr error) {
+	if cfg.TGDebugUserID == 0 {
+		return
+	}
+	_, alreadyReported, err := db.GetServiceState(maxStartupFailureStateKey)
+	if err != nil {
+		src.Logf("Failed to read MAX startup failure state: %v", err)
+		return
+	}
+	if alreadyReported {
+		return
+	}
+	message := fmt.Sprintf("MAX is unavailable; max2tg will retry automatically. Error: %v", startErr)
+	if err := sender.SendDebugMessage(message, cfg.TGDebugUserID); err != nil {
+		src.Logf("Failed to send MAX startup failure debug message: %v", err)
+		return
+	}
+	if err := db.SetServiceState(maxStartupFailureStateKey, "reported"); err != nil {
+		src.Logf("Failed to save MAX startup failure state: %v", err)
+	}
+}
+
+func notifyMaxStartupRecovery(db *src.Database, sender *src.TelegramSender, cfg *src.Config) {
+	if cfg.TGDebugUserID == 0 {
+		return
+	}
+	_, pending, err := db.GetServiceState(maxStartupFailureStateKey)
+	if err != nil {
+		src.Logf("Failed to read MAX startup failure state: %v", err)
+		return
+	}
+	if !pending {
+		return
+	}
+	if err := sender.SendDebugMessage("MAX is available again; max2tg has started successfully.", cfg.TGDebugUserID); err != nil {
+		src.Logf("Failed to send MAX startup recovery debug message: %v", err)
+		return
+	}
+	if err := db.DeleteServiceState(maxStartupFailureStateKey); err != nil {
+		src.Logf("Failed to clear MAX startup failure state: %v", err)
+	}
+}
 
 func tooLargeNote(media *src.MediaFile) string {
 	return "[Файл слишком много весит (" + src.FormatFileSize(media.Size) + ")]"
@@ -597,20 +642,29 @@ func HandleDeletedMessage(client *src.Client, db *src.Database, sender *src.Tele
 		return
 	}
 
-	existing, err := db.GetMessageByMaxID(int64(message.ID))
-	if err != nil || existing == nil {
+	tgMessageID, linkedMaxChatID, found, err := db.GetTelegramMessageForMaxID(int64(message.ID))
+	if err != nil || !found {
 		src.Logf("Deleted message %d not found in database", message.ID)
 		return
 	}
 
-	tgMsgID := int(safeInt64(existing, "tg_message_id"))
+	tgMsgID := int(tgMessageID)
 	if tgMsgID == 0 {
 		src.Logf("Deleted message %d has no valid tg_message_id in database, skipping", message.ID)
 		return
 	}
 
+	// Use the route stored with the mapping. A deletion notification may omit
+	// or alter chatId, while the database value identifies the original
+	// Telegram destination (including its forum topic).
+	maxChatID := linkedMaxChatID
+	if maxChatID == 0 && message.ChatID != 0 {
+		maxChatID = message.ChatID
+	}
+	src.Logf("Marking deleted MAX message %d in Telegram message %d (MAX chat %d)", message.ID, tgMsgID, maxChatID)
+
 	if !cfg.SaveDeleted {
-		err = sender.DeleteMessage(tgMsgID, message.ChatID)
+		err = sender.DeleteMessage(tgMsgID, maxChatID)
 		if err != nil {
 			src.Logf("Failed to delete message %d in Telegram: %v", message.ID, err)
 		} else {
@@ -644,12 +698,15 @@ func HandleDeletedMessage(client *src.Client, db *src.Database, sender *src.Tele
 	}
 
 	if hasAttachments {
-		err = sender.EditMessageCaption(tgMsgID, output, message.ChatID)
+		err = sender.EditMessageCaption(tgMsgID, output, maxChatID)
 		if err != nil {
-			err = sender.EditMessageText(tgMsgID, output, message.ChatID)
+			err = sender.EditMessageText(tgMsgID, output, maxChatID)
 		}
 	} else {
-		err = sender.EditMessageText(tgMsgID, output, message.ChatID)
+		err = sender.EditMessageText(tgMsgID, output, maxChatID)
+	}
+	if err != nil {
+		src.Logf("Failed to mark deleted MAX message %d in Telegram message %d: %v", message.ID, tgMsgID, err)
 	}
 }
 
@@ -723,7 +780,7 @@ func main() {
 	if err != nil {
 		src.Logf("Failed to check for updates: %v", err)
 	} else if updateAvailable {
-		src.Logf("New version available: %s (current: %s). Download: https://github.com/mochensky/max2tg/releases/latest", latestVersion, src.AppVersion)
+		src.Logf("New version available: %s (current: %s). Download: %s/releases/latest", latestVersion, src.AppVersion, src.RepositoryURL)
 	} else {
 		src.Logf("Application is up to date (%s)", src.AppVersion)
 	}
@@ -802,14 +859,19 @@ func main() {
 
 	if err := client.Start(); err != nil {
 		src.Logf("Failed to start client: %v", err)
-		return
+		notifyMaxStartupFailure(db, telegramSender, cfg, err)
+		// A failed initial connection is not a clean shutdown. In particular,
+		// systemd's Restart=on-failure only retries the process when it exits
+		// with a non-zero status.
+		os.Exit(1)
 	}
 
 	me := client.GetMe()
 	if me == nil {
 		src.Logf("Failed to get client info")
-		return
+		os.Exit(1)
 	}
+	notifyMaxStartupRecovery(db, telegramSender, cfg)
 	src.Logf("Connected as %s (ID: %d)", me.FirstName, me.ID)
 
 	explicitRouteIDs := make(map[int]bool)
